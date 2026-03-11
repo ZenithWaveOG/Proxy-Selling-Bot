@@ -558,8 +558,8 @@ app = Flask(__name__)
 
 # Initialize Telegram Application
 telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
-# Initialize the application (required for webhooks)
-telegram_app.initialize()
+# Initialize the application properly
+asyncio.run(telegram_app.initialize())
 
 # Register handlers
 telegram_app.add_handler(CommandHandler("start", start))
