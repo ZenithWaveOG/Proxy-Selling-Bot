@@ -8,6 +8,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from supabase import create_client, Client
 
+print("Imports OK", flush=True)   # <-- add this
+
 # ==================== CONFIG ====================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -593,14 +595,13 @@ def set_webhook():
     telegram_app.bot.set_webhook(url=url)
     return f'Webhook set to {url}', 200
 
-if __name__ == '__main__':
+def main():
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
 
 if __name__ == '__main__':
-    import sys
     try:
-        app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+        main()
     except Exception as e:
         import traceback
-        traceback.print_exc(file=sys.stderr)
+        traceback.print_exc()
         sys.exit(1)
