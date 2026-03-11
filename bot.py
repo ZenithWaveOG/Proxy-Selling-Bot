@@ -595,3 +595,12 @@ def set_webhook():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+
+if __name__ == '__main__':
+    import sys
+    try:
+        app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    except Exception as e:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
