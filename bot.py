@@ -28,7 +28,8 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ------------------- CONSTANTS -------------------
 # States for conversation handlers
-(SELECT_COUPON_TYPE, SELECT_QUANTITY, CUSTOM_QUANTITY, CONFIRM_PAYMENT) = range(4)
+# Add this to the constants section around line 30
+(TERMS_STATE, SELECT_COUPON_TYPE, SELECT_QUANTITY, CUSTOM_QUANTITY, CONFIRM_PAYMENT) = range(5)
 (ADMIN_ADD_COUPON_TYPE, ADMIN_ADD_COUPON_DATA, ADMIN_REMOVE_COUPON_TYPE, ADMIN_REMOVE_COUPON_QTY,
  ADMIN_GET_FREE_TYPE, ADMIN_GET_FREE_QTY, ADMIN_CHANGE_PRICE_TYPE, ADMIN_CHANGE_PRICE_QTY,
  ADMIN_CHANGE_PRICE_VALUE, ADMIN_BROADCAST_MSG) = range(10)
@@ -111,6 +112,7 @@ async def buy_vouchers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(terms, reply_markup=reply_markup)
+    return TERMS_STATE  # Move to terms state
 
 async def terms_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -552,16 +554,17 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     # User conversation for buying
-    buy_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^🛒 Buy Vouchers$"), buy_vouchers)],
-        states={
-            SELECT_COUPON_TYPE: [CallbackQueryHandler(select_coupon_type, pattern="^ctype_")],
-            SELECT_QUANTITY: [CallbackQueryHandler(select_quantity, pattern="^qty_")],
-            CUSTOM_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_quantity)],
-            CONFIRM_PAYMENT: [CallbackQueryHandler(verify_payment, pattern="^verify_payment$")]
-        },
-        fallbacks=[CommandHandler("start", start)]
-    )
+buy_conv = ConversationHandler(
+    entry_points=[MessageHandler(filters.Regex("^🛒 Buy Vouchers$"), buy_vouchers)],
+    states={
+        TERMS_STATE: [CallbackQueryHandler(terms_callback, pattern="^(terms_agree|terms_decline)$")],
+        SELECT_COUPON_TYPE: [CallbackQueryHandler(select_coupon_type, pattern="^ctype_")],
+        SELECT_QUANTITY: [CallbackQueryHandler(select_quantity, pattern="^qty_")],
+        CUSTOM_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_quantity)],
+        CONFIRM_PAYMENT: [CallbackQueryHandler(verify_payment, pattern="^verify_payment$")]
+    },
+    fallbacks=[CommandHandler("start", start)]
+)
     app.add_handler(buy_conv)
 
     # Admin conversation for various tasks (combined)
