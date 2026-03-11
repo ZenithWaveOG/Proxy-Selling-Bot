@@ -554,17 +554,17 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     # User conversation for buying
-buy_conv = ConversationHandler(
-    entry_points=[MessageHandler(filters.Regex("^🛒 Buy Vouchers$"), buy_vouchers)],
-    states={
-        TERMS_STATE: [CallbackQueryHandler(terms_callback, pattern="^(terms_agree|terms_decline)$")],
-        SELECT_COUPON_TYPE: [CallbackQueryHandler(select_coupon_type, pattern="^ctype_")],
-        SELECT_QUANTITY: [CallbackQueryHandler(select_quantity, pattern="^qty_")],
-        CUSTOM_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_quantity)],
-        CONFIRM_PAYMENT: [CallbackQueryHandler(verify_payment, pattern="^verify_payment$")]
-    },
-    fallbacks=[CommandHandler("start", start)]
-)
+    buy_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^🛒 Buy Vouchers$"), buy_vouchers)],
+        states={
+            TERMS_STATE: [CallbackQueryHandler(terms_callback, pattern="^(terms_agree|terms_decline)$")],
+            SELECT_COUPON_TYPE: [CallbackQueryHandler(select_coupon_type, pattern="^ctype_")],
+            SELECT_QUANTITY: [CallbackQueryHandler(select_quantity, pattern="^qty_")],
+            CUSTOM_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_quantity)],
+            CONFIRM_PAYMENT: [CallbackQueryHandler(verify_payment, pattern="^verify_payment$")]
+        },
+        fallbacks=[CommandHandler("start", start)]
+    )
     app.add_handler(buy_conv)
 
     # Admin conversation for various tasks (combined)
