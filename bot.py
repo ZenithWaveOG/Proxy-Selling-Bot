@@ -580,52 +580,30 @@ threading.Thread(target=start_background_loop, args=(bot_loop,), daemon=True).st
 # ==================== TELEGRAM APPLICATION SETUP ====================
 telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# Add all handlers
+# 1. Command handlers (always first)
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("admin", admin_panel))
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler))
 
-# Photo handler for QR (admin only)
-async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id in ADMIN_IDS and context.user_data.get('awaiting_qr'):
-        await admin_message_handler(update, context)
-telegram_app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+# 2. Conversation handlers (these manage their own states)
+telegram_app.add_handler(conv_handler)  # custom quantity
+telegram_app.add_handler(payment_conv_handler)  # payment verification (payer name & screenshot)
 
-# Callback handlers
+# 3. Callback query handlers (for inline buttons)
 telegram_app.add_handler(CallbackQueryHandler(terms_callback, pattern="^(agree|decline)_terms$"))
 telegram_app.add_handler(CallbackQueryHandler(coupon_type_callback, pattern="^ctype_"))
 telegram_app.add_handler(CallbackQueryHandler(quantity_callback, pattern="^qty_"))
 telegram_app.add_handler(CallbackQueryHandler(admin_accept_decline, pattern="^(accept|decline)_"))
 telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
 
-# Conversation handler for custom quantity
-conv_handler = ConversationHandler(
-    entry_points=[CallbackQueryHandler(quantity_callback, pattern="^qty_custom$")],
-    states={
-        CUSTOM_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_quantity_input)]
-    },
-    fallbacks=[]
-)
-telegram_app.add_handler(conv_handler)
+# 4. Specialized message handlers (photo for QR)
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id in ADMIN_IDS and context.user_data.get('awaiting_qr'):
+        await admin_message_handler(update, context)
+telegram_app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 
-# Conversation handler for payment verification
-payment_conv_handler = ConversationHandler(
-    entry_points=[CallbackQueryHandler(verify_payment_start, pattern="^verify_")],
-    states={
-        WAITING_PAYER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_name_handler)],
-        WAITING_PAYMENT_SCREENSHOT: [MessageHandler(filters.PHOTO, payment_screenshot_handler)]
-    },
-    fallbacks=[]
-)
-telegram_app.add_handler(payment_conv_handler)
-
-# Initialize the application on the background loop
-async def init_app():
-    await telegram_app.initialize()
-
-future = asyncio.run_coroutine_threadsafe(init_app(), bot_loop)
-future.result()  # Wait for initialization to complete
+# 5. General text handler (must be last – catches all other text)
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler))
 
 # ==================== FLASK WEBHOOK ENDPOINT ====================
 app = Flask(__name__)
