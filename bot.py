@@ -20,7 +20,7 @@ print("Imports OK", flush=True)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-ADMIN_IDS = [7515220054]  # Replace with your Telegram user ID
+ADMIN_IDS = [8778422236]  # Replace with your Telegram user ID
 
 # Initialize Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -31,7 +31,10 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 # ==================== CONSTANTS ====================
 COUPON_TYPES = ['500', '1000', '2000', '4000']
 QUANTITY_OPTIONS = [1, 5, 10, 20]
+
+# Conversation states
 SELECTING_COUPON_TYPE, SELECTING_QUANTITY, CUSTOM_QUANTITY = range(3)
+WAITING_PAYER_NAME, WAITING_PAYMENT_SCREENSHOT = range(3, 5)
 
 # ==================== HELPER FUNCTIONS ====================
 def get_main_menu():
@@ -286,22 +289,42 @@ async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, q
     verify_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Verify Payment", callback_data=f"verify_{order_id}")]])
     await (update.message or update.callback_query.message).reply_text("After payment, click Verify.", reply_markup=verify_keyboard)
 
-async def verify_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- New payment verification flow ---
+async def verify_payment_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     order_id = query.data.split('_')[1]
+    context.user_data['verify_order_id'] = order_id
+    await query.edit_message_text("Please enter the payer name (the name used for payment):")
+    return WAITING_PAYER_NAME
 
+async def payment_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['payer_name'] = update.message.text
+    await update.message.reply_text("Please send the screenshot of the payment:")
+    return WAITING_PAYMENT_SCREENSHOT
+
+async def payment_screenshot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    photo = update.message.photo[-1]
+    file_id = photo.file_id
+    context.user_data['screenshot_file_id'] = file_id
+    order_id = context.user_data['verify_order_id']
+
+    # Get order details
     order = supabase.table('orders').select('*').eq('order_id', order_id).execute()
     if not order.data:
-        await query.edit_message_text("Order not found.")
-        return
+        await update.message.reply_text("Order not found.")
+        return ConversationHandler.END
     o = order.data[0]
 
+    # Forward to admins with all info
     admin_list = ADMIN_IDS
     user_mention = f"@{update.effective_user.username}" if update.effective_user.username else f"{update.effective_user.first_name}"
+    payer_name = context.user_data['payer_name']
+
     admin_msg = (
         f"Payment verification requested:\n"
         f"User: {user_mention} (ID: {update.effective_user.id})\n"
+        f"Payer Name: {payer_name}\n"
         f"Order: {o['order_id']}\n"
         f"Type: {o['coupon_type']} x{o['quantity']}\n"
         f"Total: ₹{o['total_price']}\n\n"
@@ -311,14 +334,23 @@ async def verify_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("✅ Accept", callback_data=f"accept_{o['order_id']}"),
          InlineKeyboardButton("❌ Decline", callback_data=f"decline_{o['order_id']}")]
     ])
+
     for admin_id in admin_list:
         try:
-            await context.bot.send_message(admin_id, admin_msg, reply_markup=accept_keyboard)
-        except:
-            pass
+            await context.bot.send_photo(admin_id, photo=file_id, caption=admin_msg, reply_markup=accept_keyboard)
+        except Exception as e:
+            logging.error(f"Failed to send to admin {admin_id}: {e}")
 
-    await query.edit_message_text("Verification request sent to admin. Please wait for approval.")
+    await update.message.reply_text("Verification request sent to admin. Please wait for approval.")
 
+    # Clean up
+    context.user_data.pop('verify_order_id', None)
+    context.user_data.pop('payer_name', None)
+    context.user_data.pop('screenshot_file_id', None)
+
+    return ConversationHandler.END
+
+# --- Admin accept/decline ---
 async def admin_accept_decline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -553,17 +585,17 @@ telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("admin", admin_panel))
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler))
 
-# Photo handler for QR
+# Photo handler for QR (admin only)
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id in ADMIN_IDS and context.user_data.get('awaiting_qr'):
         await admin_message_handler(update, context)
 telegram_app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 
+# Callback handlers
 telegram_app.add_handler(CallbackQueryHandler(terms_callback, pattern="^(agree|decline)_terms$"))
 telegram_app.add_handler(CallbackQueryHandler(coupon_type_callback, pattern="^ctype_"))
 telegram_app.add_handler(CallbackQueryHandler(quantity_callback, pattern="^qty_"))
-telegram_app.add_handler(CallbackQueryHandler(verify_payment, pattern="^verify_"))
 telegram_app.add_handler(CallbackQueryHandler(admin_accept_decline, pattern="^(accept|decline)_"))
 telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
 
@@ -576,6 +608,17 @@ conv_handler = ConversationHandler(
     fallbacks=[]
 )
 telegram_app.add_handler(conv_handler)
+
+# Conversation handler for payment verification
+payment_conv_handler = ConversationHandler(
+    entry_points=[CallbackQueryHandler(verify_payment_start, pattern="^verify_")],
+    states={
+        WAITING_PAYER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_name_handler)],
+        WAITING_PAYMENT_SCREENSHOT: [MessageHandler(filters.PHOTO, payment_screenshot_handler)]
+    },
+    fallbacks=[]
+)
+telegram_app.add_handler(payment_conv_handler)
 
 # Initialize the application on the background loop
 async def init_app():
