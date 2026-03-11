@@ -16,6 +16,22 @@ from telegram.ext import (
     ConversationHandler,
 )
 import supabase
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+
+def run_dummy_server():
+    port = int(os.environ.get('PORT', 8000))
+    server = HTTPServer(('0.0.0.0', port), DummyHandler)
+    server.serve_forever()
+
+# Start dummy server in a background thread
+threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # ------------------- CONFIGURATION -------------------
 BOT_TOKEN = "7874330971:AAFbh1wEJmcOX2hlZAVa5Ky81Jc1mG3ea6U"
