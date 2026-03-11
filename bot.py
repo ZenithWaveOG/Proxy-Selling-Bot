@@ -566,6 +566,26 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 await update.message.reply_text("Invalid number.")
             context.user_data.pop('admin_action', None)
 
+# ==================== CONVERSATION HANDLERS DEFINITIONS ====================
+# Conversation handler for custom quantity
+conv_handler = ConversationHandler(
+    entry_points=[CallbackQueryHandler(quantity_callback, pattern="^qty_custom$")],
+    states={
+        CUSTOM_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_quantity_input)]
+    },
+    fallbacks=[]
+)
+
+# Conversation handler for payment verification
+payment_conv_handler = ConversationHandler(
+    entry_points=[CallbackQueryHandler(verify_payment_start, pattern="^verify_")],
+    states={
+        WAITING_PAYER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_name_handler)],
+        WAITING_PAYMENT_SCREENSHOT: [MessageHandler(filters.PHOTO, payment_screenshot_handler)]
+    },
+    fallbacks=[]
+)
+
 # ==================== BACKGROUND EVENT LOOP ====================
 # Create a background event loop for the bot
 bot_loop = asyncio.new_event_loop()
