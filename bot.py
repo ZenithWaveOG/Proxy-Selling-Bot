@@ -568,53 +568,45 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
 # ==================== WEBHOOK SETUP ====================
 app = Flask(__name__)
 
-# Initialize Telegram Application
-telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
-# Initialize the application properly
-asyncio.run(telegram_app.initialize())
+# Simple root endpoint for health checks
+@app.route('/')
+def home():
+    return "Bot is running!", 200
 
-# Register handlers
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler))
-telegram_app.add_handler(CallbackQueryHandler(terms_callback, pattern="^(agree|decline)_terms$"))
-telegram_app.add_handler(CallbackQueryHandler(coupon_type_callback, pattern="^ctype_"))
-telegram_app.add_handler(CallbackQueryHandler(quantity_callback, pattern="^qty_"))
-telegram_app.add_handler(CallbackQueryHandler(verify_payment, pattern="^verify_"))
-telegram_app.add_handler(CallbackQueryHandler(admin_accept_decline, pattern="^(accept|decline)_"))
-telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
-telegram_app.add_handler(CommandHandler("admin", admin_panel))
-
-# Conversation handler for custom quantity
-conv_handler = ConversationHandler(
-    entry_points=[CallbackQueryHandler(quantity_callback, pattern="^qty_custom$")],
-    states={
-        CUSTOM_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_quantity_input)]
-    },
-    fallbacks=[]
-)
-telegram_app.add_handler(conv_handler)
-
-# Webhook endpoint
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    # Run the async update processor
-    asyncio.run(telegram_app.process_update(update))
-    return 'ok', 200
-
+# Optional: manual webhook setter (can be removed if not needed)
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
     url = request.url_root.rstrip('/') + '/webhook'
     telegram_app.bot.set_webhook(url=url)
     return f'Webhook set to {url}', 200
 
-def main():
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+def run_bot():
+    """Run the bot application in a separate thread with its own event loop."""
+    # Create a new event loop for this thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # Initialize the application (this must be done in the same loop)
+    loop.run_until_complete(telegram_app.initialize())
+    
+    # Determine webhook URL from Render's external hostname or fallback
+    external_hostname = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'proxy-selling-bot.onrender.com')
+    webhook_url = f"https://{external_hostname}/webhook"
+    
+    # Start the webhook handling (this will run the loop forever)
+    print(f"Starting bot with webhook URL: {webhook_url}", flush=True)
+    telegram_app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get('PORT', 5000)),
+        url_path="webhook",
+        webhook_url=webhook_url
+    )
 
+# Start the bot thread before Flask
+bot_thread = threading.Thread(target=run_bot, daemon=True)
+bot_thread.start()
+
+# Keep the main thread alive (Flask will run here)
 if __name__ == '__main__':
-    try:
-        main()
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    # Run Flask in the main thread
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
