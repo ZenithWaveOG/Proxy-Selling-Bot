@@ -289,7 +289,7 @@ async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, q
     verify_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Verify Payment", callback_data=f"verify_{order_id}")]])
     await (update.message or update.callback_query.message).reply_text("After payment, click Verify.", reply_markup=verify_keyboard)
 
-# --- New payment verification flow ---
+# --- Payment verification flow ---
 async def verify_payment_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -604,6 +604,13 @@ telegram_app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 
 # 5. General text handler (must be last – catches all other text)
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler))
+
+# Initialize the application on the background loop
+async def init_app():
+    await telegram_app.initialize()
+
+future = asyncio.run_coroutine_threadsafe(init_app(), bot_loop)
+future.result()  # Wait for initialization to complete
 
 # ==================== FLASK WEBHOOK ENDPOINT ====================
 app = Flask(__name__)
