@@ -17,8 +17,8 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 ADMIN_IDS = [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-PORT = int(os.environ.get("PORT", 10000))  # Render provides PORT
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")  # e.g., https://yourapp.onrender.com
+PORT = int(os.environ.get("PORT", 10000))
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
 if not RENDER_EXTERNAL_URL:
     raise ValueError("RENDER_EXTERNAL_URL environment variable not set. Set it to your app's public URL.")
 
@@ -35,10 +35,10 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ------------------- CONSTANTS -------------------
 # States for conversation handlers
-(TERMS_STATE, SELECT_COUPON_TYPE, SELECT_QUANTITY, CUSTOM_QUANTITY, CONFIRM_PAYMENT) = range(5)
+(TERMS_STATE, SELECT_COUPON_TYPE, SELECT_QUANTITY, CONFIRM_PAYMENT) = range(4)  # CUSTOM_QUANTITY removed
 (ADMIN_ADD_COUPON_TYPE, ADMIN_ADD_COUPON_DATA, ADMIN_REMOVE_COUPON_TYPE, ADMIN_REMOVE_COUPON_QTY,
  ADMIN_GET_FREE_TYPE, ADMIN_GET_FREE_QTY, ADMIN_CHANGE_PRICE_TYPE, ADMIN_CHANGE_PRICE_QTY,
- ADMIN_CHANGE_PRICE_VALUE, ADMIN_BROADCAST_MSG) = range(5, 15)
+ ADMIN_CHANGE_PRICE_VALUE, ADMIN_BROADCAST_MSG) = range(4, 14)
 
 # ------------------- HELPER FUNCTIONS -------------------
 def generate_order_id():
@@ -157,7 +157,7 @@ async def select_coupon_type(update: Update, context: ContextTypes.DEFAULT_TYPE)
          InlineKeyboardButton("5 Qty", callback_data="qty_5")],
         [InlineKeyboardButton("10 Qty", callback_data="qty_10"),
          InlineKeyboardButton("20 Qty", callback_data="qty_20")],
-        [InlineKeyboardButton("Custom Qty", callback_data="qty_custom")]
+        # Custom Qty button removed
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(msg, reply_markup=reply_markup)
@@ -169,38 +169,13 @@ async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     if data.startswith("qty_"):
         qty_str = data.replace("qty_", "")
-        if qty_str == "custom":
-            await query.edit_message_text("Please enter the quantity you want:")
-            return CUSTOM_QUANTITY
-        else:
-            qty = int(qty_str)
-            context.user_data['qty'] = qty
-            await show_invoice(query, context)
-            return CONFIRM_PAYMENT
+        qty = int(qty_str)  # now only numbers, no "custom"
+        context.user_data['qty'] = qty
+        await show_invoice(query, context)
+        return CONFIRM_PAYMENT
     else:
         await query.edit_message_text("Error, please start over.")
         return ConversationHandler.END
-
-async def custom_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Step 1: Validate input is a positive integer
-    try:
-        qty = int(update.message.text)
-        if qty <= 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("Invalid number. Please enter a positive integer (e.g., 5, 21).")
-        return CUSTOM_QUANTITY
-
-    # Step 2: Save quantity and try to create invoice
-    context.user_data['qty'] = qty
-    try:
-        await show_invoice(update.message, context)
-        return CONFIRM_PAYMENT
-    except Exception as e:
-        # Log the actual error (will appear in Render logs)
-        logger.error(f"Invoice creation failed for user {update.effective_user.id}: {e}")
-        await update.message.reply_text("Sorry, something went wrong while creating your order. Please try again later or contact support.")
-        return CUSTOM_QUANTITY  # Allow them to try again
 
 async def show_invoice(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     ctype = context.user_data['ctype']
@@ -211,7 +186,6 @@ async def show_invoice(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['order_id'] = order_id
     context.user_data['total'] = total
     
-    # Insert order into Supabase
     try:
         supabase.table("orders").insert({
             "order_id": order_id,
@@ -224,15 +198,14 @@ async def show_invoice(update_or_query, context: ContextTypes.DEFAULT_TYPE):
         }).execute()
     except Exception as e:
         logger.error(f"Failed to insert order {order_id}: {e}")
-        raise RuntimeError("Database error while creating order") from e
-    
-    # Get QR code
-    try:
-        qr_resp = supabase.table("settings").select("value").eq("key", "qr_file_id").execute()
-        qr_file_id = qr_resp.data[0]['value'] if qr_resp.data else None
-    except Exception as e:
-        logger.error(f"Failed to fetch QR code: {e}")
-        qr_file_id = None  # Continue without QR
+        if isinstance(update_or_query, Update):
+            await update_or_query.reply_text("Sorry, something went wrong. Please try again later.")
+        else:
+            await update_or_query.edit_message_text("Sorry, something went wrong. Please try again later.")
+        return
+
+    qr_resp = supabase.table("settings").select("value").eq("key", "qr_file_id").execute()
+    qr_file_id = qr_resp.data[0]['value'] if qr_resp.data else None
     
     invoice_msg = (
         f"🧾 INVOICE\n━━━━━━━━━━━━━━\n"
@@ -557,20 +530,19 @@ async def admin_update_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ------------------- MAIN -------------------
 def main():
-    # Create application
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # User conversation for buying
+    # User conversation for buying (no custom quantity)
     buy_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^🛒 Buy Vouchers$"), buy_vouchers)],
         states={
             TERMS_STATE: [CallbackQueryHandler(terms_callback, pattern="^(terms_agree|terms_decline)$")],
             SELECT_COUPON_TYPE: [CallbackQueryHandler(select_coupon_type, pattern="^ctype_")],
             SELECT_QUANTITY: [CallbackQueryHandler(select_quantity, pattern="^qty_")],
-            CUSTOM_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_quantity)],
             CONFIRM_PAYMENT: [CallbackQueryHandler(verify_payment, pattern="^verify_payment$")]
         },
-        fallbacks=[CommandHandler("start", start)]
+        fallbacks=[CommandHandler("start", start)],
+        per_message=True
     )
     app.add_handler(buy_conv)
 
@@ -589,7 +561,8 @@ def main():
             ADMIN_CHANGE_PRICE_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_price_value)],
             ADMIN_BROADCAST_MSG: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_msg)],
         },
-        fallbacks=[CommandHandler("start", start)]
+        fallbacks=[CommandHandler("start", start)],
+        per_message=True
     )
     app.add_handler(admin_conv)
 
@@ -599,7 +572,8 @@ def main():
         states={
             0: [MessageHandler(filters.PHOTO, admin_update_qr)]
         },
-        fallbacks=[CommandHandler("start", start)]
+        fallbacks=[CommandHandler("start", start)],
+        per_message=True
     )
     app.add_handler(qr_conv)
 
