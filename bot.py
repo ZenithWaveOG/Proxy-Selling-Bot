@@ -182,16 +182,25 @@ async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
 async def custom_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Step 1: Validate input is a positive integer
     try:
         qty = int(update.message.text)
         if qty <= 0:
             raise ValueError
-        context.user_data['qty'] = qty
+    except ValueError:
+        await update.message.reply_text("Invalid number. Please enter a positive integer (e.g., 5, 21).")
+        return CUSTOM_QUANTITY
+
+    # Step 2: Save quantity and try to create invoice
+    context.user_data['qty'] = qty
+    try:
         await show_invoice(update.message, context)
         return CONFIRM_PAYMENT
-    except:
-        await update.message.reply_text("Invalid number. Please enter a positive integer.")
-        return CUSTOM_QUANTITY
+    except Exception as e:
+        # Log the actual error (will appear in Render logs)
+        logger.error(f"Invoice creation failed for user {update.effective_user.id}: {e}")
+        await update.message.reply_text("Sorry, something went wrong while creating your order. Please try again later or contact support.")
+        return CUSTOM_QUANTITY  # Allow them to try again
 
 async def show_invoice(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     ctype = context.user_data['ctype']
@@ -201,17 +210,30 @@ async def show_invoice(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     order_id = generate_order_id()
     context.user_data['order_id'] = order_id
     context.user_data['total'] = total
-    supabase.table("orders").insert({
-        "order_id": order_id,
-        "user_id": update_or_query.from_user.id,
-        "coupon_type": ctype,
-        "quantity": qty,
-        "amount_paid": total,
-        "status": "pending",
-        "payment_time": datetime.utcnow().isoformat()
-    }).execute()
-    qr_resp = supabase.table("settings").select("value").eq("key", "qr_file_id").execute()
-    qr_file_id = qr_resp.data[0]['value'] if qr_resp.data else None
+    
+    # Insert order into Supabase
+    try:
+        supabase.table("orders").insert({
+            "order_id": order_id,
+            "user_id": update_or_query.from_user.id,
+            "coupon_type": ctype,
+            "quantity": qty,
+            "amount_paid": total,
+            "status": "pending",
+            "payment_time": datetime.utcnow().isoformat()
+        }).execute()
+    except Exception as e:
+        logger.error(f"Failed to insert order {order_id}: {e}")
+        raise RuntimeError("Database error while creating order") from e
+    
+    # Get QR code
+    try:
+        qr_resp = supabase.table("settings").select("value").eq("key", "qr_file_id").execute()
+        qr_file_id = qr_resp.data[0]['value'] if qr_resp.data else None
+    except Exception as e:
+        logger.error(f"Failed to fetch QR code: {e}")
+        qr_file_id = None  # Continue without QR
+    
     invoice_msg = (
         f"🧾 INVOICE\n━━━━━━━━━━━━━━\n"
         f"🆔 {order_id}\n"
@@ -222,6 +244,7 @@ async def show_invoice(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     )
     keyboard = [[InlineKeyboardButton("✅ Verify Payment", callback_data="verify_payment")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
+    
     if isinstance(update_or_query, Update):
         if qr_file_id:
             await update_or_query.reply_photo(photo=qr_file_id, caption=invoice_msg, reply_markup=reply_markup)
