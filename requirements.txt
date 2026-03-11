@@ -1,3 +1,5 @@
 Flask==2.3.3
 python-telegram-bot==20.7
-supabase==2.5.0
+supabase==2.3.0
+httpx==0.24.1
+gotrue==1.2.0
