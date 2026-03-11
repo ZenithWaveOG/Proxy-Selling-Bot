@@ -18,10 +18,10 @@ from telegram.ext import (
 import supabase
 
 # ------------------- CONFIGURATION -------------------
-BOT_TOKEN = "YOUR_BOT_TOKEN"
-ADMIN_IDS = [123456789, 987654321]  # Replace with your Telegram user IDs
-SUPABASE_URL = "YOUR_SUPABASE_URL"
-SUPABASE_KEY = "YOUR_SUPABASE_ANON_KEY"
+BOT_TOKEN = "7874330971:AAFbh1wEJmcOX2hlZAVa5Ky81Jc1mG3ea6U"
+ADMIN_IDS = [7515220054]  # Replace with your Telegram user IDs
+SUPABASE_URL = "https://mflpthszdikedskfakdn.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1mbHB0aHN6ZGlrZWRza2Zha2RuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMyMzQwMjEsImV4cCI6MjA4ODgxMDAyMX0.6MgQFu1Cemcgk8HCuGElnNxNHeP9ekb9DCQYluNzNFw"
 
 # Initialize Supabase client
 supabase_client = supabase.create_client(SUPABASE_URL, SUPABASE_KEY)
