@@ -59,18 +59,24 @@ async def get_stock(coupon_type: str = None):
     return counts
 
 async def get_price(coupon_type: str, quantity: int):
-    if quantity < 5:
-        cat = '1'
-    elif quantity < 10:
-        cat = '5'
-    elif quantity < 20:
-        cat = '10'
-    else:
-        cat = '20'
-    resp = supabase.table("prices").select("price").eq("coupon_type", coupon_type).eq("qty_category", cat).execute()
-    if resp.data:
-        return resp.data[0]['price']
-    return 0
+    try:
+        if quantity < 5:
+            cat = '1'
+        elif quantity < 10:
+            cat = '5'
+        elif quantity < 20:
+            cat = '10'
+        else:
+            cat = '20'
+        resp = supabase.table("prices").select("price").eq("coupon_type", coupon_type).eq("qty_category", cat).execute()
+        if resp.data:
+            return resp.data[0]['price']
+        else:
+            logger.warning(f"No price found for {coupon_type} category {cat}")
+            return 0  # fallback
+    except Exception as e:
+        logger.error(f"Error in get_price: {e}")
+        raise  # Re-raise to be caught upstream
 
 async def record_user(update: Update):
     user = update.effective_user
@@ -165,71 +171,97 @@ async def select_coupon_type(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    data = query.data
-    if data.startswith("qty_"):
-        qty_str = data.replace("qty_", "")
-        qty = int(qty_str)  # now only numbers, no "custom"
-        context.user_data['qty'] = qty
-        await show_invoice(query, context)
-        return CONFIRM_PAYMENT
-    else:
-        await query.edit_message_text("Error, please start over.")
-        return ConversationHandler.END
-
-async def show_invoice(update_or_query, context: ContextTypes.DEFAULT_TYPE):
-    ctype = context.user_data['ctype']
-    qty = context.user_data['qty']
-    price_per = await get_price(ctype, qty)
-    total = price_per * qty
-    order_id = generate_order_id()
-    context.user_data['order_id'] = order_id
-    context.user_data['total'] = total
+    await query.answer()  # Always acknowledge the callback
     
     try:
-        supabase.table("orders").insert({
-            "order_id": order_id,
-            "user_id": update_or_query.from_user.id,
-            "coupon_type": ctype,
-            "quantity": qty,
-            "amount_paid": total,
-            "status": "pending",
-            "payment_time": datetime.utcnow().isoformat()
-        }).execute()
+        data = query.data
+        if data.startswith("qty_"):
+            qty_str = data.replace("qty_", "")
+            qty = int(qty_str)
+            context.user_data['qty'] = qty
+            await show_invoice(query, context)
+            return CONFIRM_PAYMENT
+        else:
+            await query.edit_message_text("Error, please start over.")
+            return ConversationHandler.END
     except Exception as e:
-        logger.error(f"Failed to insert order {order_id}: {e}")
+        logger.error(f"Error in select_quantity for user {update.effective_user.id}: {e}", exc_info=True)
+        await query.edit_message_text("An unexpected error occurred. Please try again later or contact support.")
+        return ConversationHandler.END
+        
+async def show_invoice(update_or_query, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        ctype = context.user_data['ctype']
+        qty = context.user_data['qty']
+        
+        # Get price with error handling
+        try:
+            price_per = await get_price(ctype, qty)
+        except Exception as e:
+            logger.error(f"Error in get_price for {ctype}, qty {qty}: {e}")
+            raise RuntimeError("Failed to retrieve price")
+            
+        total = price_per * qty
+        order_id = generate_order_id()
+        context.user_data['order_id'] = order_id
+        context.user_data['total'] = total
+        
+        # Insert order
+        try:
+            supabase.table("orders").insert({
+                "order_id": order_id,
+                "user_id": update_or_query.from_user.id,
+                "coupon_type": ctype,
+                "quantity": qty,
+                "amount_paid": total,
+                "status": "pending",
+                "payment_time": datetime.utcnow().isoformat()
+            }).execute()
+        except Exception as e:
+            logger.error(f"Failed to insert order {order_id}: {e}")
+            raise RuntimeError("Database error while creating order")
+        
+        # Get QR code
+        try:
+            qr_resp = supabase.table("settings").select("value").eq("key", "qr_file_id").execute()
+            qr_file_id = qr_resp.data[0]['value'] if qr_resp.data else None
+        except Exception as e:
+            logger.error(f"Failed to fetch QR code: {e}")
+            qr_file_id = None
+        
+        invoice_msg = (
+            f"🧾 INVOICE\n━━━━━━━━━━━━━━\n"
+            f"🆔 {order_id}\n"
+            f"📦 {ctype} (x{qty})\n"
+            f"💰 Pay Exactly: ₹{total:.2f}\n"
+            f"⚠️ CRITICAL: You MUST pay exact amount. Do not ignore the paise, or the bot will NOT find your payment!\n\n"
+            f"⏳ QR valid for 10 minutes."
+        )
+        keyboard = [[InlineKeyboardButton("✅ Verify Payment", callback_data="verify_payment")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         if isinstance(update_or_query, Update):
-            await update_or_query.reply_text("Sorry, something went wrong. Please try again later.")
+            if qr_file_id:
+                await update_or_query.reply_photo(photo=qr_file_id, caption=invoice_msg, reply_markup=reply_markup)
+            else:
+                await update_or_query.reply_text(invoice_msg + "\n\n(QR not set by admin)", reply_markup=reply_markup)
         else:
-            await update_or_query.edit_message_text("Sorry, something went wrong. Please try again later.")
-        return
-
-    qr_resp = supabase.table("settings").select("value").eq("key", "qr_file_id").execute()
-    qr_file_id = qr_resp.data[0]['value'] if qr_resp.data else None
-    
-    invoice_msg = (
-        f"🧾 INVOICE\n━━━━━━━━━━━━━━\n"
-        f"🆔 {order_id}\n"
-        f"📦 {ctype} (x{qty})\n"
-        f"💰 Pay Exactly: ₹{total:.2f}\n"
-        f"⚠️ CRITICAL: You MUST pay exact amount. Do not ignore the paise, or the bot will NOT find your payment!\n\n"
-        f"⏳ QR valid for 10 minutes."
-    )
-    keyboard = [[InlineKeyboardButton("✅ Verify Payment", callback_data="verify_payment")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if isinstance(update_or_query, Update):
-        if qr_file_id:
-            await update_or_query.reply_photo(photo=qr_file_id, caption=invoice_msg, reply_markup=reply_markup)
+            await update_or_query.edit_message_text(invoice_msg)
+            if qr_file_id:
+                await update_or_query.message.reply_photo(photo=qr_file_id, reply_markup=reply_markup)
+            else:
+                await update_or_query.message.reply_text("(QR not set by admin)", reply_markup=reply_markup)
+                
+    except Exception as e:
+        logger.error(f"Error in show_invoice: {e}", exc_info=True)
+        error_msg = "Sorry, something went wrong while creating your order. Please try again later."
+        if isinstance(update_or_query, Update):
+            await update_or_query.reply_text(error_msg)
         else:
-            await update_or_query.reply_text(invoice_msg + "\n\n(QR not set by admin)", reply_markup=reply_markup)
-    else:
-        await update_or_query.edit_message_text(invoice_msg)
-        if qr_file_id:
-            await update_or_query.message.reply_photo(photo=qr_file_id, reply_markup=reply_markup)
-        else:
-            await update_or_query.message.reply_text("(QR not set by admin)", reply_markup=reply_markup)
-
+            await update_or_query.edit_message_text(error_msg)
+        # Re-raise to ensure conversation ends
+        raise
+        
 async def verify_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
