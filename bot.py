@@ -2,15 +2,16 @@ import os
 import logging
 import random
 import string
-import threading
 import asyncio
+import threading
+import sys
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from supabase import create_client, Client
 
-print("Imports OK", flush=True)   # <-- add this
+print("Imports OK", flush=True)
 
 # ==================== CONFIG ====================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -24,74 +25,9 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # Setup logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# ==================== DATABASE SETUP ====================
-# Run these SQL commands in Supabase SQL editor:
-
-"""
--- Users table
-CREATE TABLE users (
-    user_id BIGINT PRIMARY KEY,
-    username TEXT,
-    first_name TEXT,
-    joined_at TIMESTAMP DEFAULT NOW()
-);
-
--- Coupons table
-CREATE TABLE coupons (
-    id SERIAL PRIMARY KEY,
-    code TEXT NOT NULL,
-    type TEXT NOT NULL CHECK (type IN ('500','1000','2000','4000')),
-    is_used BOOLEAN DEFAULT FALSE,
-    used_by BIGINT REFERENCES users(user_id),
-    used_at TIMESTAMP
-);
-
--- Orders table
-CREATE TABLE orders (
-    id SERIAL PRIMARY KEY,
-    order_id TEXT UNIQUE NOT NULL,
-    user_id BIGINT REFERENCES users(user_id),
-    coupon_type TEXT NOT NULL,
-    quantity INTEGER NOT NULL,
-    total_price INTEGER NOT NULL,
-    status TEXT DEFAULT 'pending' CHECK (status IN ('pending','completed','declined')),
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
--- Prices table (per coupon type and quantity)
-CREATE TABLE prices (
-    coupon_type TEXT PRIMARY KEY,
-    price_1 INTEGER NOT NULL,
-    price_5 INTEGER NOT NULL,
-    price_10 INTEGER NOT NULL,
-    price_20 INTEGER NOT NULL
-);
--- Insert default prices
-INSERT INTO prices (coupon_type, price_1, price_5, price_10, price_20) VALUES
-('500', 10, 45, 80, 150),
-('1000', 20, 90, 160, 300),
-('2000', 35, 160, 300, 550),
-('4000', 60, 280, 520, 1000);
-
--- Settings table (for QR image)
-CREATE TABLE settings (
-    key TEXT PRIMARY KEY,
-    value TEXT
-);
-INSERT INTO settings (key, value) VALUES ('qr_image', ''); -- store file_id or URL
-
--- Admin table (optional)
-CREATE TABLE admins (
-    user_id BIGINT PRIMARY KEY
-);
-INSERT INTO admins (user_id) VALUES (123456789);
-"""
-
 # ==================== CONSTANTS ====================
 COUPON_TYPES = ['500', '1000', '2000', '4000']
 QUANTITY_OPTIONS = [1, 5, 10, 20]
-
-# Conversation states for custom quantity
 SELECTING_COUPON_TYPE, SELECTING_QUANTITY, CUSTOM_QUANTITY = range(3)
 
 # ==================== HELPER FUNCTIONS ====================
@@ -114,12 +50,10 @@ def get_agree_decline_keyboard():
 def get_coupon_type_keyboard():
     keyboard = []
     for ct in COUPON_TYPES:
-        # Fetch price from db later, but here just label
         keyboard.append([InlineKeyboardButton(f"{ct} Off", callback_data=f"ctype_{ct}")])
     return InlineKeyboardMarkup(keyboard)
 
 def get_quantity_keyboard(coupon_type):
-    # Get prices from db to display on buttons
     prices = supabase.table('prices').select('*').eq('coupon_type', coupon_type).execute()
     if prices.data:
         p = prices.data[0]
@@ -131,7 +65,6 @@ def get_quantity_keyboard(coupon_type):
             [InlineKeyboardButton("Custom Qty", callback_data="qty_custom")]
         ]
     else:
-        # fallback
         keyboard = [[InlineKeyboardButton("Error loading prices", callback_data="error")]]
     return InlineKeyboardMarkup(keyboard)
 
@@ -152,7 +85,6 @@ def get_admin_panel_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 def get_coupon_type_admin_keyboard(action):
-    # action: 'add', 'remove', 'free', 'prices'
     keyboard = []
     for ct in COUPON_TYPES:
         keyboard.append([InlineKeyboardButton(f"{ct} Off", callback_data=f"admin_{action}_{ct}")])
@@ -161,14 +93,12 @@ def get_coupon_type_admin_keyboard(action):
 # ==================== HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    # Save user to db if not exists
     supabase.table('users').upsert({
         'user_id': user.id,
         'username': user.username,
         'first_name': user.first_name
     }).execute()
     
-    # Show stock and welcome
     stock_msg = "✏️ PROXY CODE SHOP\n━━━━━━━━━━━━━━\n📊 Current Stock\n\n"
     for ct in COUPON_TYPES:
         count = supabase.table('coupons').select('*', count='exact').eq('type', ct).eq('is_used', False).execute()
@@ -183,12 +113,10 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text
 
-    # Check if this is an admin with an ongoing admin action
-    if user.id in ADMIN_IDS and 'admin_action' in context.user_data:
+    if user.id in ADMIN_IDS and ('admin_action' in context.user_data or context.user_data.get('broadcast') or context.user_data.get('awaiting_qr')):
         await admin_message_handler(update, context)
         return
 
-    # Normal user menu processing
     if text == "🛒 Buy Vouchers":
         terms = (
             "1. Once coupon is delivered, no returns or refunds will be accepted.\n"
@@ -240,7 +168,6 @@ async def coupon_type_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     ctype = query.data.split('_')[1]
     context.user_data['coupon_type'] = ctype
     
-    # Get stock
     count = supabase.table('coupons').select('*', count='exact').eq('type', ctype).eq('is_used', False).execute()
     stock = count.count if hasattr(count, 'count') else 0
     await query.edit_message_text(
@@ -272,7 +199,6 @@ async def custom_quantity_input(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, qty):
     ctype = context.user_data['coupon_type']
-    # Determine price tier
     prices = supabase.table('prices').select('*').eq('coupon_type', ctype).execute()
     if not prices.data:
         await (update.message or update.callback_query.message).reply_text("Price error.")
@@ -288,14 +214,12 @@ async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, q
         price_per = p['price_20']
     total = price_per * qty
     
-    # Generate order id
     order_id = generate_order_id()
     context.user_data['order_id'] = order_id
     context.user_data['qty'] = qty
     context.user_data['price_per'] = price_per
     context.user_data['total'] = total
     
-    # Save order as pending
     supabase.table('orders').insert({
         'order_id': order_id,
         'user_id': update.effective_user.id,
@@ -305,7 +229,6 @@ async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, q
         'status': 'pending'
     }).execute()
     
-    # Get QR image from settings
     qr_setting = supabase.table('settings').select('value').eq('key', 'qr_image').execute()
     qr_file_id = qr_setting.data[0]['value'] if qr_setting.data and qr_setting.data[0]['value'] else None
     
@@ -331,15 +254,13 @@ async def verify_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     order_id = query.data.split('_')[1]
     
-    # Get order details
     order = supabase.table('orders').select('*').eq('order_id', order_id).execute()
     if not order.data:
         await query.edit_message_text("Order not found.")
         return
     o = order.data[0]
     
-    # Forward to all admins
-    admin_list = ADMIN_IDS  # or fetch from admins table
+    admin_list = ADMIN_IDS
     user_mention = f"@{update.effective_user.username}" if update.effective_user.username else f"{update.effective_user.first_name}"
     admin_msg = (
         f"Payment verification requested:\n"
@@ -375,21 +296,17 @@ async def admin_accept_decline(update: Update, context: ContextTypes.DEFAULT_TYP
     o = order.data[0]
     
     if action == "accept":
-        # Fetch unused coupons of the type
         coupons = supabase.table('coupons').select('*').eq('type', o['coupon_type']).eq('is_used', False).limit(o['quantity']).execute()
         if len(coupons.data) < o['quantity']:
             await query.edit_message_text("Insufficient stock!")
             return
         
         codes = [c['code'] for c in coupons.data]
-        # Mark coupons as used
         for c in coupons.data:
             supabase.table('coupons').update({'is_used': True, 'used_by': o['user_id'], 'used_at': datetime.utcnow().isoformat()}).eq('id', c['id']).execute()
         
-        # Update order status
         supabase.table('orders').update({'status': 'completed'}).eq('order_id', order_id).execute()
         
-        # Send codes to user
         codes_text = "\n".join(codes)
         await context.bot.send_message(o['user_id'], f"✅ Payment accepted! Here are your codes:\n{codes_text}\n\nThanks for purchasing!")
         
@@ -449,7 +366,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Send the new QR code image.")
         return
     
-    # Handle sub-actions
     elif data.startswith('admin_add_'):
         ctype = data.split('_')[2]
         context.user_data['admin_action'] = ('add', ctype)
@@ -464,7 +380,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"How many free codes from {ctype} Off? (send a number)")
     elif data.startswith('admin_prices_'):
         ctype = data.split('_')[2]
-        # Show quantity selection for price change
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("1 Qty", callback_data=f"price_qty_{ctype}_1")],
             [InlineKeyboardButton("5 Qty", callback_data=f"price_qty_{ctype}_5")],
@@ -484,7 +399,6 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
     text = update.message.text
     
-    # Handle broadcast
     if context.user_data.get('broadcast'):
         users = supabase.table('users').select('user_id').execute()
         success = 0
@@ -495,21 +409,19 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
             except:
                 pass
         await update.message.reply_text(f"Broadcast sent to {success}/{len(users.data)} users.")
-        context.user_data.pop('broadcast', None)  # Clean up
+        context.user_data.pop('broadcast', None)
         return
     
-    # Handle QR update
     if context.user_data.get('awaiting_qr'):
         if update.message.photo:
             file_id = update.message.photo[-1].file_id
             supabase.table('settings').upsert({'key': 'qr_image', 'value': file_id}).execute()
             await update.message.reply_text("QR code updated.")
-            context.user_data.pop('awaiting_qr', None)  # Clean up
+            context.user_data.pop('awaiting_qr', None)
         else:
             await update.message.reply_text("Please send an image.")
         return
     
-    # Handle admin actions (add, remove, free, price)
     if 'admin_action' in context.user_data:
         action = context.user_data['admin_action']
         if action[0] == 'add':
@@ -520,7 +432,7 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 if code:
                     supabase.table('coupons').insert({'code': code, 'type': ctype}).execute()
             await update.message.reply_text(f"Coupons added successfully to {ctype} Off.")
-            context.user_data.pop('admin_action', None)  # Clean up
+            context.user_data.pop('admin_action', None)
             
         elif action[0] == 'remove':
             ctype = action[1]
@@ -533,7 +445,7 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 await update.message.reply_text(f"Removed {len(ids)} coupons from {ctype} Off.")
             except:
                 await update.message.reply_text("Invalid number.")
-            context.user_data.pop('admin_action', None)  # Clean up
+            context.user_data.pop('admin_action', None)
             
         elif action[0] == 'free':
             ctype = action[1]
@@ -552,7 +464,7 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 await update.message.reply_text(f"Here are your free codes:\n" + "\n".join(codes))
             except:
                 await update.message.reply_text("Invalid number.")
-            context.user_data.pop('admin_action', None)  # Clean up
+            context.user_data.pop('admin_action', None)
             
         elif action[0] == 'price':
             ctype = action[1]
@@ -564,50 +476,69 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 await update.message.reply_text(f"Price updated for {ctype} Off, {qty} Qty: ₹{new_price}")
             except:
                 await update.message.reply_text("Invalid number.")
-            context.user_data.pop('admin_action', None)  # Clean up
+            context.user_data.pop('admin_action', None)
 
-# ==================== WEBHOOK SETUP ====================
+# ==================== BACKGROUND EVENT LOOP ====================
+# Create a background event loop for the bot
+bot_loop = asyncio.new_event_loop()
+
+def start_background_loop(loop):
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+# Start the background loop in a daemon thread
+threading.Thread(target=start_background_loop, args=(bot_loop,), daemon=True).start()
+
+# ==================== TELEGRAM APPLICATION SETUP ====================
+telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+# Add all handlers
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler))
+telegram_app.add_handler(CallbackQueryHandler(terms_callback, pattern="^(agree|decline)_terms$"))
+telegram_app.add_handler(CallbackQueryHandler(coupon_type_callback, pattern="^ctype_"))
+telegram_app.add_handler(CallbackQueryHandler(quantity_callback, pattern="^qty_"))
+telegram_app.add_handler(CallbackQueryHandler(verify_payment, pattern="^verify_"))
+telegram_app.add_handler(CallbackQueryHandler(admin_accept_decline, pattern="^(accept|decline)_"))
+telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
+telegram_app.add_handler(CommandHandler("admin", admin_panel))
+
+# Conversation handler
+conv_handler = ConversationHandler(
+    entry_points=[CallbackQueryHandler(quantity_callback, pattern="^qty_custom$")],
+    states={
+        CUSTOM_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_quantity_input)]
+    },
+    fallbacks=[]
+)
+telegram_app.add_handler(conv_handler)
+
+# Initialize the application on the background loop
+async def init_app():
+    await telegram_app.initialize()
+
+future = asyncio.run_coroutine_threadsafe(init_app(), bot_loop)
+future.result()  # Wait for initialization to complete
+
+# ==================== FLASK WEBHOOK ENDPOINT ====================
 app = Flask(__name__)
 
-# Simple root endpoint for health checks
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    # Schedule the update processing on the background loop
+    asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), bot_loop)
+    return 'ok', 200
+
+@app.route('/set_webhook', methods=['GET'])
+def set_webhook():
+    url = request.url_root.rstrip('/') + '/webhook'
+    asyncio.run_coroutine_threadsafe(telegram_app.bot.set_webhook(url=url), bot_loop)
+    return f'Webhook set to {url}', 200
+
 @app.route('/')
 def home():
     return "Bot is running!", 200
 
-# Optional: manual webhook setter (can be removed if not needed)
-@app.route('/set_webhook', methods=['GET'])
-def set_webhook():
-    url = request.url_root.rstrip('/') + '/webhook'
-    telegram_app.bot.set_webhook(url=url)
-    return f'Webhook set to {url}', 200
-
-def run_bot():
-    """Run the bot application in a separate thread with its own event loop."""
-    # Create a new event loop for this thread
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    # Initialize the application (this must be done in the same loop)
-    loop.run_until_complete(telegram_app.initialize())
-    
-    # Determine webhook URL from Render's external hostname or fallback
-    external_hostname = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'proxy-selling-bot.onrender.com')
-    webhook_url = f"https://{external_hostname}/webhook"
-    
-    # Start the webhook handling (this will run the loop forever)
-    print(f"Starting bot with webhook URL: {webhook_url}", flush=True)
-    telegram_app.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.environ.get('PORT', 5000)),
-        url_path="webhook",
-        webhook_url=webhook_url
-    )
-
-# Start the bot thread before Flask
-bot_thread = threading.Thread(target=run_bot, daemon=True)
-bot_thread.start()
-
-# Keep the main thread alive (Flask will run here)
 if __name__ == '__main__':
-    # Run Flask in the main thread
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
