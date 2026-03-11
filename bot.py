@@ -179,7 +179,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(stock_msg, reply_markup=get_main_menu())
 
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     text = update.message.text
+
+    # Check if this is an admin with an ongoing admin action
+    if user.id in ADMIN_IDS and 'admin_action' in context.user_data:
+        await admin_message_handler(update, context)
+        return
+
+    # Normal user menu processing
     if text == "🛒 Buy Vouchers":
         terms = (
             "1. Once coupon is delivered, no returns or refunds will be accepted.\n"
@@ -190,7 +198,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(terms, reply_markup=get_agree_decline_keyboard())
     elif text == "📦 My Orders":
-        orders = supabase.table('orders').select('*').eq('user_id', update.effective_user.id).order('created_at', desc=True).limit(10).execute()
+        orders = supabase.table('orders').select('*').eq('user_id', user.id).order('created_at', desc=True).limit(10).execute()
         if not orders.data:
             await update.message.reply_text("You have no orders yet.")
         else:
@@ -474,8 +482,9 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if update.effective_user.id not in ADMIN_IDS:
         return
     text = update.message.text
+    
+    # Handle broadcast
     if context.user_data.get('broadcast'):
-        # Broadcast to all users
         users = supabase.table('users').select('user_id').execute()
         success = 0
         for u in users.data:
@@ -485,20 +494,21 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
             except:
                 pass
         await update.message.reply_text(f"Broadcast sent to {success}/{len(users.data)} users.")
-        context.user_data['broadcast'] = False
+        context.user_data.pop('broadcast', None)  # Clean up
         return
     
+    # Handle QR update
     if context.user_data.get('awaiting_qr'):
-        # They sent a photo? handle photo or file_id
         if update.message.photo:
             file_id = update.message.photo[-1].file_id
             supabase.table('settings').upsert({'key': 'qr_image', 'value': file_id}).execute()
             await update.message.reply_text("QR code updated.")
-            context.user_data['awaiting_qr'] = False
+            context.user_data.pop('awaiting_qr', None)  # Clean up
         else:
             await update.message.reply_text("Please send an image.")
         return
     
+    # Handle admin actions (add, remove, free, price)
     if 'admin_action' in context.user_data:
         action = context.user_data['admin_action']
         if action[0] == 'add':
@@ -509,12 +519,12 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 if code:
                     supabase.table('coupons').insert({'code': code, 'type': ctype}).execute()
             await update.message.reply_text(f"Coupons added successfully to {ctype} Off.")
-            context.user_data.pop('admin_action')
+            context.user_data.pop('admin_action', None)  # Clean up
+            
         elif action[0] == 'remove':
             ctype = action[1]
             try:
                 num = int(text)
-                # Fetch and delete oldest 'num' unused coupons of that type
                 coupons = supabase.table('coupons').select('id').eq('type', ctype).eq('is_used', False).order('id').limit(num).execute()
                 ids = [c['id'] for c in coupons.data]
                 if ids:
@@ -522,7 +532,8 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 await update.message.reply_text(f"Removed {len(ids)} coupons from {ctype} Off.")
             except:
                 await update.message.reply_text("Invalid number.")
-            context.user_data.pop('admin_action')
+            context.user_data.pop('admin_action', None)  # Clean up
+            
         elif action[0] == 'free':
             ctype = action[1]
             try:
@@ -531,27 +542,28 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 if len(coupons.data) < num:
                     await update.message.reply_text(f"Only {len(coupons.data)} available.")
                 codes = [c['code'] for c in coupons.data]
-                # Mark them as used? According to spec: "in db that codes should be set to false and true can use. false cant send by the bot"
-                # Actually they want to retrieve free codes and mark them as used? The spec says "set to false and true can use" confusing.
-                # We'll assume free codes are given and marked as used so they are not sold again.
                 for c in coupons.data:
-                    supabase.table('coupons').update({'is_used': True, 'used_by': update.effective_user.id, 'used_at': datetime.utcnow().isoformat()}).eq('code', c['code']).execute()
+                    supabase.table('coupons').update({
+                        'is_used': True, 
+                        'used_by': update.effective_user.id, 
+                        'used_at': datetime.utcnow().isoformat()
+                    }).eq('code', c['code']).execute()
                 await update.message.reply_text(f"Here are your free codes:\n" + "\n".join(codes))
             except:
                 await update.message.reply_text("Invalid number.")
-            context.user_data.pop('admin_action')
+            context.user_data.pop('admin_action', None)  # Clean up
+            
         elif action[0] == 'price':
             ctype = action[1]
             qty = action[2]
             try:
                 new_price = int(text)
-                # Update prices table
                 col = f"price_{qty}"
                 supabase.table('prices').update({col: new_price}).eq('coupon_type', ctype).execute()
                 await update.message.reply_text(f"Price updated for {ctype} Off, {qty} Qty: ₹{new_price}")
             except:
                 await update.message.reply_text("Invalid number.")
-            context.user_data.pop('admin_action')
+            context.user_data.pop('admin_action', None)  # Clean up
 
 # ==================== WEBHOOK SETUP ====================
 app = Flask(__name__)
@@ -581,9 +593,6 @@ conv_handler = ConversationHandler(
     fallbacks=[]
 )
 telegram_app.add_handler(conv_handler)
-
-# Admin message handler (for broadcast, add coupons etc)
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_message_handler))
 
 # Webhook endpoint
 @app.route('/webhook', methods=['POST'])
