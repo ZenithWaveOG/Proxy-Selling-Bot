@@ -377,7 +377,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(msg)
     elif data == "admin_update_qr":
         await query.edit_message_text("Please send me the new QR code image.")
-        return ADMIN_UPDATE_QR
+        return  # This will be handled by separate QR conversation handler
     elif data.startswith("admin_add"):
         # Show type selection for add
         keyboard = [
@@ -390,17 +390,32 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Select coupon type to add:", reply_markup=reply_markup)
         return ADMIN_ADD_COUPON_TYPE
     elif data.startswith("admin_remove"):
-        keyboard = same as above
+        keyboard = [
+            [InlineKeyboardButton("500 Off", callback_data="removetype_500 Off")],
+            [InlineKeyboardButton("1000 Off", callback_data="removetype_1000 Off")],
+            [InlineKeyboardButton("2000 Off", callback_data="removetype_2000 Off")],
+            [InlineKeyboardButton("4000 Off", callback_data="removetype_4000 Off")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text("Select coupon type to remove:", reply_markup=reply_markup)
         return ADMIN_REMOVE_COUPON_TYPE
     elif data.startswith("admin_free"):
-        keyboard = same
+        keyboard = [
+            [InlineKeyboardButton("500 Off", callback_data="freetype_500 Off")],
+            [InlineKeyboardButton("1000 Off", callback_data="freetype_1000 Off")],
+            [InlineKeyboardButton("2000 Off", callback_data="freetype_2000 Off")],
+            [InlineKeyboardButton("4000 Off", callback_data="freetype_4000 Off")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text("Select coupon type for free code:", reply_markup=reply_markup)
         return ADMIN_GET_FREE_TYPE
     elif data.startswith("admin_price"):
-        keyboard = same
+        keyboard = [
+            [InlineKeyboardButton("500 Off", callback_data="pricetype_500 Off")],
+            [InlineKeyboardButton("1000 Off", callback_data="pricetype_1000 Off")],
+            [InlineKeyboardButton("2000 Off", callback_data="pricetype_2000 Off")],
+            [InlineKeyboardButton("4000 Off", callback_data="pricetype_4000 Off")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text("Select coupon type to change price:", reply_markup=reply_markup)
         return ADMIN_CHANGE_PRICE_TYPE
@@ -549,9 +564,7 @@ def main():
     )
     app.add_handler(buy_conv)
 
-    # Admin conversation for various tasks (multiple convs or use same handler with states)
-    # For simplicity, we'll use separate conversation handlers, but here we combine into one big one
-    # We'll define a single ConversationHandler with states for admin actions
+    # Admin conversation for various tasks (combined)
     admin_conv = ConversationHandler(
         entry_points=[CommandHandler("admin", admin_panel)],
         states={
@@ -565,20 +578,15 @@ def main():
             ADMIN_CHANGE_PRICE_QTY: [CallbackQueryHandler(admin_price_qty, pattern="^priceqty_")],
             ADMIN_CHANGE_PRICE_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_price_value)],
             ADMIN_BROADCAST_MSG: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_msg)],
-            # For update QR we handle separately with a simple state
         },
         fallbacks=[CommandHandler("start", start)]
     )
     app.add_handler(admin_conv)
 
-    # Handle the QR update from admin (outside conversation, or inside)
-    # We'll add a separate handler for photo during admin QR update, but it's simpler to handle with a state
-    # However the conversation above doesn't include QR update state, so we need a separate conv or handle via callback
-    # Let's add a separate conversation for QR update triggered by admin callback
+    # Separate conversation for QR update (since it's triggered by callback)
     qr_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_callback, pattern="^admin_update_qr$")],
         states={
-            # we can use a dummy state
             0: [MessageHandler(filters.PHOTO, admin_update_qr)]
         },
         fallbacks=[CommandHandler("start", start)]
