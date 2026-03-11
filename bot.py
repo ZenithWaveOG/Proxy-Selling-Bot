@@ -182,12 +182,12 @@ async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
 async def custom_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+    text = (update.message.text or "").strip()
 
-    # Allow numbers like 5, 22, 384, 1000 etc
+    # allow numbers like 5,22,384 etc
     if not text.isdigit():
         await update.message.reply_text(
-            "❌ Please send only a number.\n\nExample:\n5\n10\n25"
+            "❌ Please enter a valid number.\n\nExample: 5"
         )
         return CUSTOM_QUANTITY
 
@@ -197,56 +197,76 @@ async def custom_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Quantity must be greater than 0.")
         return CUSTOM_QUANTITY
 
-    # Optional safety limit
     if qty > 10000:
-        await update.message.reply_text("❌ Quantity too large. Please enter smaller number.")
+        await update.message.reply_text("❌ Quantity too large.")
         return CUSTOM_QUANTITY
 
-    context.user_data['qty'] = qty
-    await show_invoice(update.message, context)
+    context.user_data["qty"] = qty
+
+    # show invoice
+    await show_invoice(update, context)
 
     return CONFIRM_PAYMENT
 
 async def show_invoice(update_or_query, context: ContextTypes.DEFAULT_TYPE):
+
+    if hasattr(update_or_query, "callback_query"):
+        user = update_or_query.callback_query.from_user
+        message = update_or_query.callback_query.message
+    else:
+        user = update_or_query.message.from_user
+        message = update_or_query.message
+
     ctype = context.user_data['ctype']
     qty = context.user_data['qty']
+
     price_per = await get_price(ctype, qty)
     total = price_per * qty
+
     order_id = generate_order_id()
+
     context.user_data['order_id'] = order_id
     context.user_data['total'] = total
+
     supabase.table("orders").insert({
         "order_id": order_id,
-        "user_id": update_or_query.from_user.id,
+        "user_id": user.id,
         "coupon_type": ctype,
         "quantity": qty,
         "amount_paid": total,
         "status": "pending",
         "payment_time": datetime.utcnow().isoformat()
     }).execute()
+
     qr_resp = supabase.table("settings").select("value").eq("key", "qr_file_id").execute()
     qr_file_id = qr_resp.data[0]['value'] if qr_resp.data else None
+
     invoice_msg = (
-        f"🧾 INVOICE\n━━━━━━━━━━━━━━\n"
-        f"🆔 {order_id}\n"
-        f"📦 {ctype} (x{qty})\n"
-        f"💰 Pay Exactly: ₹{total:.2f}\n"
-        f"⚠️ CRITICAL: You MUST pay exact amount. Do not ignore the paise, or the bot will NOT find your payment!\n\n"
-        f"⏳ QR valid for 10 minutes."
+        f"🧾 INVOICE\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🆔 Order: {order_id}\n"
+        f"📦 {ctype} x{qty}\n"
+        f"💰 Pay: ₹{total}\n\n"
+        f"⚠️ Pay the exact amount."
     )
-    keyboard = [[InlineKeyboardButton("✅ Verify Payment", callback_data="verify_payment")]]
+
+    keyboard = [
+        [InlineKeyboardButton("✅ Verify Payment", callback_data="verify_payment")]
+    ]
+
     reply_markup = InlineKeyboardMarkup(keyboard)
-    if isinstance(update_or_query, Update):
-        if qr_file_id:
-            await update_or_query.reply_photo(photo=qr_file_id, caption=invoice_msg, reply_markup=reply_markup)
-        else:
-            await update_or_query.reply_text(invoice_msg + "\n\n(QR not set by admin)", reply_markup=reply_markup)
+
+    if qr_file_id:
+        await message.reply_photo(
+            photo=qr_file_id,
+            caption=invoice_msg,
+            reply_markup=reply_markup
+        )
     else:
-        await update_or_query.edit_message_text(invoice_msg)
-        if qr_file_id:
-            await update_or_query.message.reply_photo(photo=qr_file_id, reply_markup=reply_markup)
-        else:
-            await update_or_query.message.reply_text("(QR not set by admin)", reply_markup=reply_markup)
+        await message.reply_text(
+            invoice_msg + "\n\n(QR not set by admin)",
+            reply_markup=reply_markup
+        )
 
 async def verify_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
