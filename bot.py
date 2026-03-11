@@ -2,6 +2,7 @@ import os
 import logging
 import random
 import string
+import asyncio
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -557,6 +558,8 @@ app = Flask(__name__)
 
 # Initialize Telegram Application
 telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
+# Initialize the application (required for webhooks)
+telegram_app.initialize()
 
 # Register handlers
 telegram_app.add_handler(CommandHandler("start", start))
@@ -586,7 +589,8 @@ telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_m
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    telegram_app.process_update(update)
+    # Run the async update processor
+    asyncio.run(telegram_app.process_update(update))
     return 'ok', 200
 
 @app.route('/set_webhook', methods=['GET'])
