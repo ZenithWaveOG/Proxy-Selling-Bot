@@ -108,12 +108,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stock_msg += f"▫️ {ct} Off: {stock} left (₹{price_val})\n"
     
     await update.message.reply_text(stock_msg, reply_markup=get_main_menu())
-
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text
 
-    if user.id in ADMIN_IDS and ('admin_action' in context.user_data or context.user_data.get('broadcast') or context.user_data.get('awaiting_qr')):
+    # If admin and any admin flag is active, delegate to admin handler
+    if user.id in ADMIN_IDS and (
+        'admin_action' in context.user_data or 
+        context.user_data.get('broadcast') or 
+        context.user_data.get('awaiting_qr')
+    ):
         await admin_message_handler(update, context)
         return
 
@@ -331,6 +335,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     data = query.data
+    
+    # Clear previous admin flags before setting new ones
+    context.user_data.pop('broadcast', None)
+    context.user_data.pop('awaiting_qr', None)
+    context.user_data.pop('admin_action', None)
+    
     if data == "admin_add":
         await query.edit_message_text("Select coupon type to add:", reply_markup=get_coupon_type_admin_keyboard('add'))
     elif data == "admin_remove":
@@ -366,6 +376,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Send the new QR code image.")
         return
     
+    # Handle sub-actions
     elif data.startswith('admin_add_'):
         ctype = data.split('_')[2]
         context.user_data['admin_action'] = ('add', ctype)
@@ -417,7 +428,7 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
             file_id = update.message.photo[-1].file_id
             supabase.table('settings').upsert({'key': 'qr_image', 'value': file_id}).execute()
             await update.message.reply_text("QR code updated.")
-            context.user_data.pop('awaiting_qr', None)
+            context.user_data.pop('awaiting_qr', None)   # This is good
         else:
             await update.message.reply_text("Please send an image.")
         return
