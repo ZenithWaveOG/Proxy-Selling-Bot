@@ -182,16 +182,30 @@ async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
 async def custom_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        qty = int(update.message.text)
-        if qty <= 0:
-            raise ValueError
-        context.user_data['qty'] = qty
-        await show_invoice(update.message, context)
-        return CONFIRM_PAYMENT
-    except:
-        await update.message.reply_text("Invalid number. Please enter a positive integer.")
+    text = update.message.text.strip()
+
+    # Allow numbers like 5, 22, 384, 1000 etc
+    if not text.isdigit():
+        await update.message.reply_text(
+            "❌ Please send only a number.\n\nExample:\n5\n10\n25"
+        )
         return CUSTOM_QUANTITY
+
+    qty = int(text)
+
+    if qty <= 0:
+        await update.message.reply_text("❌ Quantity must be greater than 0.")
+        return CUSTOM_QUANTITY
+
+    # Optional safety limit
+    if qty > 10000:
+        await update.message.reply_text("❌ Quantity too large. Please enter smaller number.")
+        return CUSTOM_QUANTITY
+
+    context.user_data['qty'] = qty
+    await show_invoice(update.message, context)
+
+    return CONFIRM_PAYMENT
 
 async def show_invoice(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     ctype = context.user_data['ctype']
