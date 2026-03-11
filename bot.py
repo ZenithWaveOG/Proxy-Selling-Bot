@@ -6,9 +6,12 @@ import asyncio
 import threading
 import sys
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify
+from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler, MessageHandler,
+    filters, ContextTypes, ConversationHandler
+)
 from supabase import create_client, Client
 
 print("Imports OK", flush=True)
@@ -58,10 +61,10 @@ def get_quantity_keyboard(coupon_type):
     if prices.data:
         p = prices.data[0]
         keyboard = [
-            [InlineKeyboardButton(f"1 Qty - ₹{p['price_1']}", callback_data=f"qty_1")],
-            [InlineKeyboardButton(f"5 Qty - ₹{p['price_5']}", callback_data=f"qty_5")],
-            [InlineKeyboardButton(f"10 Qty - ₹{p['price_10']}", callback_data=f"qty_10")],
-            [InlineKeyboardButton(f"20 Qty - ₹{p['price_20']}", callback_data=f"qty_20")],
+            [InlineKeyboardButton(f"1 Qty - ₹{p['price_1']}", callback_data="qty_1")],
+            [InlineKeyboardButton(f"5 Qty - ₹{p['price_5']}", callback_data="qty_5")],
+            [InlineKeyboardButton(f"10 Qty - ₹{p['price_10']}", callback_data="qty_10")],
+            [InlineKeyboardButton(f"20 Qty - ₹{p['price_20']}", callback_data="qty_20")],
             [InlineKeyboardButton("Custom Qty", callback_data="qty_custom")]
         ]
     else:
@@ -98,7 +101,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'username': user.username,
         'first_name': user.first_name
     }).execute()
-    
+
     stock_msg = "✏️ PROXY CODE SHOP\n━━━━━━━━━━━━━━\n📊 Current Stock\n\n"
     for ct in COUPON_TYPES:
         count = supabase.table('coupons').select('*', count='exact').eq('type', ct).eq('is_used', False).execute()
@@ -106,21 +109,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         price = supabase.table('prices').select('price_1').eq('coupon_type', ct).execute()
         price_val = price.data[0]['price_1'] if price.data else 'N/A'
         stock_msg += f"▫️ {ct} Off: {stock} left (₹{price_val})\n"
-    
+
     await update.message.reply_text(stock_msg, reply_markup=get_main_menu())
+
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text
 
     # If admin and any admin flag is active, delegate to admin handler
     if user.id in ADMIN_IDS and (
-        'admin_action' in context.user_data or 
-        context.user_data.get('broadcast') or 
+        'admin_action' in context.user_data or
+        context.user_data.get('broadcast') or
         context.user_data.get('awaiting_qr')
     ):
         await admin_message_handler(update, context)
         return
 
+    # Normal user menu
     if text == "🛒 Buy Vouchers":
         terms = (
             "1. Once coupon is delivered, no returns or refunds will be accepted.\n"
@@ -171,7 +176,7 @@ async def coupon_type_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     ctype = query.data.split('_')[1]
     context.user_data['coupon_type'] = ctype
-    
+
     count = supabase.table('coupons').select('*', count='exact').eq('type', ctype).eq('is_used', False).execute()
     stock = count.count if hasattr(count, 'count') else 0
     await query.edit_message_text(
@@ -188,6 +193,16 @@ async def quantity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CUSTOM_QUANTITY
     else:
         qty = int(data.split('_')[1])
+        # Check stock
+        ctype = context.user_data.get('coupon_type')
+        if not ctype:
+            await query.edit_message_text("Error: coupon type not set.")
+            return ConversationHandler.END
+        count = supabase.table('coupons').select('*', count='exact').eq('type', ctype).eq('is_used', False).execute()
+        stock = count.count if hasattr(count, 'count') else 0
+        if stock < qty:
+            await query.edit_message_text(f"❌ Only {stock} codes available for {ctype} Off. Please select a lower quantity.")
+            return ConversationHandler.END
         await process_quantity(update, context, qty)
     return ConversationHandler.END
 
@@ -196,6 +211,16 @@ async def custom_quantity_input(update: Update, context: ContextTypes.DEFAULT_TY
         qty = int(update.message.text)
         if qty <= 0:
             raise ValueError
+        # Check stock
+        ctype = context.user_data.get('coupon_type')
+        if not ctype:
+            await update.message.reply_text("Error: coupon type not set. Please start over.")
+            return ConversationHandler.END
+        count = supabase.table('coupons').select('*', count='exact').eq('type', ctype).eq('is_used', False).execute()
+        stock = count.count if hasattr(count, 'count') else 0
+        if stock < qty:
+            await update.message.reply_text(f"❌ Only {stock} codes available. Please enter a lower quantity.")
+            return ConversationHandler.END
         await process_quantity(update, context, qty)
     except:
         await update.message.reply_text("Invalid number. Please use the menu again.")
@@ -203,6 +228,14 @@ async def custom_quantity_input(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, qty):
     ctype = context.user_data['coupon_type']
+
+    # Double-check stock (safety)
+    count = supabase.table('coupons').select('*', count='exact').eq('type', ctype).eq('is_used', False).execute()
+    stock = count.count if hasattr(count, 'count') else 0
+    if stock < qty:
+        await (update.message or update.callback_query.message).reply_text(f"❌ Only {stock} codes available for {ctype} Off.")
+        return
+
     prices = supabase.table('prices').select('*').eq('coupon_type', ctype).execute()
     if not prices.data:
         await (update.message or update.callback_query.message).reply_text("Price error.")
@@ -217,13 +250,13 @@ async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, q
     else:
         price_per = p['price_20']
     total = price_per * qty
-    
+
     order_id = generate_order_id()
     context.user_data['order_id'] = order_id
     context.user_data['qty'] = qty
     context.user_data['price_per'] = price_per
     context.user_data['total'] = total
-    
+
     supabase.table('orders').insert({
         'order_id': order_id,
         'user_id': update.effective_user.id,
@@ -232,10 +265,10 @@ async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, q
         'total_price': total,
         'status': 'pending'
     }).execute()
-    
+
     qr_setting = supabase.table('settings').select('value').eq('key', 'qr_image').execute()
     qr_file_id = qr_setting.data[0]['value'] if qr_setting.data and qr_setting.data[0]['value'] else None
-    
+
     invoice_text = (
         f"🧾 INVOICE\n━━━━━━━━━━━━━━\n"
         f"🆔 {order_id}\n"
@@ -244,12 +277,12 @@ async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, q
         f"⚠️ CRITICAL: You MUST pay exact amount. Do not ignore the paise (decimals), or the bot will NOT find your payment!\n\n"
         f"⏳ QR valid for 10 minutes."
     )
-    
+
     if qr_file_id:
         await (update.message or update.callback_query.message).reply_photo(photo=qr_file_id, caption=invoice_text)
     else:
         await (update.message or update.callback_query.message).reply_text(invoice_text + "\n\n(QR not set by admin yet)")
-    
+
     verify_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Verify Payment", callback_data=f"verify_{order_id}")]])
     await (update.message or update.callback_query.message).reply_text("After payment, click Verify.", reply_markup=verify_keyboard)
 
@@ -257,13 +290,13 @@ async def verify_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     order_id = query.data.split('_')[1]
-    
+
     order = supabase.table('orders').select('*').eq('order_id', order_id).execute()
     if not order.data:
         await query.edit_message_text("Order not found.")
         return
     o = order.data[0]
-    
+
     admin_list = ADMIN_IDS
     user_mention = f"@{update.effective_user.username}" if update.effective_user.username else f"{update.effective_user.first_name}"
     admin_msg = (
@@ -283,7 +316,7 @@ async def verify_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(admin_id, admin_msg, reply_markup=accept_keyboard)
         except:
             pass
-    
+
     await query.edit_message_text("Verification request sent to admin. Please wait for approval.")
 
 async def admin_accept_decline(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -292,28 +325,32 @@ async def admin_accept_decline(update: Update, context: ContextTypes.DEFAULT_TYP
     data = query.data.split('_')
     action = data[0]
     order_id = data[1]
-    
+
     order = supabase.table('orders').select('*').eq('order_id', order_id).execute()
     if not order.data:
         await query.edit_message_text("Order not found.")
         return
     o = order.data[0]
-    
+
     if action == "accept":
         coupons = supabase.table('coupons').select('*').eq('type', o['coupon_type']).eq('is_used', False).limit(o['quantity']).execute()
         if len(coupons.data) < o['quantity']:
             await query.edit_message_text("Insufficient stock!")
             return
-        
+
         codes = [c['code'] for c in coupons.data]
         for c in coupons.data:
-            supabase.table('coupons').update({'is_used': True, 'used_by': o['user_id'], 'used_at': datetime.utcnow().isoformat()}).eq('id', c['id']).execute()
-        
+            supabase.table('coupons').update({
+                'is_used': True,
+                'used_by': o['user_id'],
+                'used_at': datetime.utcnow().isoformat()
+            }).eq('id', c['id']).execute()
+
         supabase.table('orders').update({'status': 'completed'}).eq('order_id', order_id).execute()
-        
+
         codes_text = "\n".join(codes)
         await context.bot.send_message(o['user_id'], f"✅ Payment accepted! Here are your codes:\n{codes_text}\n\nThanks for purchasing!")
-        
+
         await query.edit_message_text(f"Order {order_id} completed. Codes sent.")
     else:
         supabase.table('orders').update({'status': 'declined'}).eq('order_id', order_id).execute()
@@ -333,14 +370,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await query.edit_message_text("Unauthorized.")
         return
-    
+
     data = query.data
-    
-    # Clear previous admin flags before setting new ones
+
+    # Clear any previous admin flags
     context.user_data.pop('broadcast', None)
     context.user_data.pop('awaiting_qr', None)
     context.user_data.pop('admin_action', None)
-    
+
     if data == "admin_add":
         await query.edit_message_text("Select coupon type to add:", reply_markup=get_coupon_type_admin_keyboard('add'))
     elif data == "admin_remove":
@@ -375,7 +412,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['awaiting_qr'] = True
         await query.edit_message_text("Send the new QR code image.")
         return
-    
+
     # Handle sub-actions
     elif data.startswith('admin_add_'):
         ctype = data.split('_')[2]
@@ -392,24 +429,27 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith('admin_prices_'):
         ctype = data.split('_')[2]
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("1 Qty", callback_data=f"price_qty_{ctype}_1")],
-            [InlineKeyboardButton("5 Qty", callback_data=f"price_qty_{ctype}_5")],
-            [InlineKeyboardButton("10 Qty", callback_data=f"price_qty_{ctype}_10")],
-            [InlineKeyboardButton("20 Qty", callback_data=f"price_qty_{ctype}_20")]
+            [InlineKeyboardButton("1 Qty", callback_data=f"admin_price_qty_{ctype}_1")],
+            [InlineKeyboardButton("5 Qty", callback_data=f"admin_price_qty_{ctype}_5")],
+            [InlineKeyboardButton("10 Qty", callback_data=f"admin_price_qty_{ctype}_10")],
+            [InlineKeyboardButton("20 Qty", callback_data=f"admin_price_qty_{ctype}_20")]
         ])
         await query.edit_message_text(f"Select quantity for {ctype} Off price change:", reply_markup=keyboard)
-    elif data.startswith('price_qty_'):
+    elif data.startswith('admin_price_qty_'):
         parts = data.split('_')
-        ctype = parts[2]
-        qty = parts[3]
+        # ['admin','price','qty','500','1']
+        ctype = parts[3]
+        qty = parts[4]
         context.user_data['admin_action'] = ('price', ctype, qty)
         await query.edit_message_text(f"Enter new price for {ctype} Off, {qty} Qty:")
 
 async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
-    text = update.message.text
-    
+    text = update.message.text if update.message.text else None
+    photo = update.message.photo[-1] if update.message.photo else None
+
+    # Handle broadcast
     if context.user_data.get('broadcast'):
         users = supabase.table('users').select('user_id').execute()
         success = 0
@@ -422,21 +462,26 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(f"Broadcast sent to {success}/{len(users.data)} users.")
         context.user_data.pop('broadcast', None)
         return
-    
+
+    # Handle QR update (photo)
     if context.user_data.get('awaiting_qr'):
-        if update.message.photo:
-            file_id = update.message.photo[-1].file_id
+        if photo:
+            file_id = photo.file_id
             supabase.table('settings').upsert({'key': 'qr_image', 'value': file_id}).execute()
             await update.message.reply_text("QR code updated.")
-            context.user_data.pop('awaiting_qr', None)   # This is good
+            context.user_data.pop('awaiting_qr', None)
         else:
             await update.message.reply_text("Please send an image.")
         return
-    
+
+    # Handle admin actions (add, remove, free, price)
     if 'admin_action' in context.user_data:
         action = context.user_data['admin_action']
         if action[0] == 'add':
             ctype = action[1]
+            if not text:
+                await update.message.reply_text("Please send the coupon codes as text.")
+                return
             codes = text.strip().split('\n')
             for code in codes:
                 code = code.strip()
@@ -444,7 +489,7 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
                     supabase.table('coupons').insert({'code': code, 'type': ctype}).execute()
             await update.message.reply_text(f"Coupons added successfully to {ctype} Off.")
             context.user_data.pop('admin_action', None)
-            
+
         elif action[0] == 'remove':
             ctype = action[1]
             try:
@@ -457,7 +502,7 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
             except:
                 await update.message.reply_text("Invalid number.")
             context.user_data.pop('admin_action', None)
-            
+
         elif action[0] == 'free':
             ctype = action[1]
             try:
@@ -468,15 +513,15 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 codes = [c['code'] for c in coupons.data]
                 for c in coupons.data:
                     supabase.table('coupons').update({
-                        'is_used': True, 
-                        'used_by': update.effective_user.id, 
+                        'is_used': True,
+                        'used_by': update.effective_user.id,
                         'used_at': datetime.utcnow().isoformat()
                     }).eq('code', c['code']).execute()
                 await update.message.reply_text(f"Here are your free codes:\n" + "\n".join(codes))
             except:
                 await update.message.reply_text("Invalid number.")
             context.user_data.pop('admin_action', None)
-            
+
         elif action[0] == 'price':
             ctype = action[1]
             qty = action[2]
@@ -505,16 +550,24 @@ telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
 
 # Add all handlers
 telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("admin", admin_panel))
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler))
+
+# Photo handler for QR
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id in ADMIN_IDS and context.user_data.get('awaiting_qr'):
+        await admin_message_handler(update, context)
+telegram_app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+
 telegram_app.add_handler(CallbackQueryHandler(terms_callback, pattern="^(agree|decline)_terms$"))
 telegram_app.add_handler(CallbackQueryHandler(coupon_type_callback, pattern="^ctype_"))
 telegram_app.add_handler(CallbackQueryHandler(quantity_callback, pattern="^qty_"))
 telegram_app.add_handler(CallbackQueryHandler(verify_payment, pattern="^verify_"))
 telegram_app.add_handler(CallbackQueryHandler(admin_accept_decline, pattern="^(accept|decline)_"))
 telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
-telegram_app.add_handler(CommandHandler("admin", admin_panel))
 
-# Conversation handler
+# Conversation handler for custom quantity
 conv_handler = ConversationHandler(
     entry_points=[CallbackQueryHandler(quantity_callback, pattern="^qty_custom$")],
     states={
@@ -537,7 +590,6 @@ app = Flask(__name__)
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    # Schedule the update processing on the background loop
     asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), bot_loop)
     return 'ok', 200
 
