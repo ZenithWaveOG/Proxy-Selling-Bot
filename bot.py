@@ -358,19 +358,30 @@ async def admin_accept_decline(update: Update, context: ContextTypes.DEFAULT_TYP
     action = data[0]
     order_id = data[1]
 
+    # Fetch order from database
     order = supabase.table('orders').select('*').eq('order_id', order_id).execute()
     if not order.data:
         await query.edit_message_text("Order not found.")
         return
     o = order.data[0]
 
+    # Check if order is already processed
+    if o['status'] != 'pending':
+        await query.edit_message_text(
+            f"❌ This order ({order_id}) has already been processed (status: {o['status']}).\n"
+            "No further action is possible."
+        )
+        return
+
     if action == "accept":
+        # Fetch unused coupons of the required type
         coupons = supabase.table('coupons').select('*').eq('type', o['coupon_type']).eq('is_used', False).limit(o['quantity']).execute()
         if len(coupons.data) < o['quantity']:
-            await query.edit_message_text("Insufficient stock!")
+            await query.edit_message_text("❌ Insufficient stock! Cannot accept payment.")
             return
 
         codes = [c['code'] for c in coupons.data]
+        # Mark coupons as used
         for c in coupons.data:
             supabase.table('coupons').update({
                 'is_used': True,
@@ -378,16 +389,25 @@ async def admin_accept_decline(update: Update, context: ContextTypes.DEFAULT_TYP
                 'used_at': datetime.utcnow().isoformat()
             }).eq('id', c['id']).execute()
 
+        # Update order status to completed
         supabase.table('orders').update({'status': 'completed'}).eq('order_id', order_id).execute()
 
+        # Send codes to user
         codes_text = "\n".join(codes)
-        await context.bot.send_message(o['user_id'], f"✅ Payment accepted! Here are your codes:\n{codes_text}\n\nThanks for purchasing!")
+        await context.bot.send_message(
+            o['user_id'],
+            f"✅ Payment accepted! Here are your codes:\n{codes_text}\n\nThanks for purchasing!"
+        )
 
-        await query.edit_message_text(f"Order {order_id} completed. Codes sent.")
-    else:
+        await query.edit_message_text(f"✅ Order {order_id} completed. Codes sent to user.")
+    else:  # decline
+        # Update order status to declined
         supabase.table('orders').update({'status': 'declined'}).eq('order_id', order_id).execute()
-        await context.bot.send_message(o['user_id'], "❌ Your payment has been declined by admin. If there is any issue, contact support.")
-        await query.edit_message_text(f"Order {order_id} declined.")
+        await context.bot.send_message(
+            o['user_id'],
+            "❌ Your payment has been declined by admin. If there is any issue, contact support."
+        )
+        await query.edit_message_text(f"❌ Order {order_id} declined.")
 
 # ==================== ADMIN HANDLERS ====================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
