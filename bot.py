@@ -5,6 +5,7 @@ import string
 import asyncio
 import threading
 import sys
+import requests  # added for API calls
 from datetime import datetime, timedelta
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -22,6 +23,11 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 ADMIN_IDS = [7515220054]  # Replace with your Telegram user ID
 
+# Ultra Pay API credentials
+ULTRA_PAY_TOKEN = os.environ.get("ULTRA_PAY_TOKEN")
+ULTRA_PAY_KEY = os.environ.get("ULTRA_PAY_KEY")
+ULTRA_PAY_NUMBER = os.environ.get("ULTRA_PAY_NUMBER")
+
 # Initialize Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -32,9 +38,8 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 COUPON_TYPES = ['500', '1000', '2000', '4000']
 QUANTITY_OPTIONS = [1, 5, 10, 20]
 
-# Conversation states
+# Conversation states (only custom quantity remains)
 SELECTING_COUPON_TYPE, SELECTING_QUANTITY, CUSTOM_QUANTITY = range(3)
-WAITING_PAYER_NAME, WAITING_PAYMENT_SCREENSHOT = range(3, 5)
 
 # ==================== HELPER FUNCTIONS ====================
 def get_main_menu():
@@ -135,7 +140,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "2. All coupons are fresh and valid.\n"
             "3. All sales are final. No refunds, no replacements.\n"
             "4. If coupon shows redeemed, try after some time (10-15 min).\n"
-            "5. If there is a genuine issue and you recorded full screen from payment to applying, you can contact support."
+            "5. Payment is automatic via Ultra Pay. You will receive codes instantly after successful payment."
         )
         await update.message.reply_text(terms, reply_markup=get_agree_decline_keyboard())
     elif text == "📦 My Orders":
@@ -153,7 +158,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "2. 📦 ELIGIBILITY: Valid only for SHEINVERSE: https://www.sheinindia.in/c/sverse-5939-37961\n"
             "3. ⚡️ DELIVERY: codes are delivered immediately after payment confirmation.\n"
             "4. 🚫 NO REFUNDS: All sales final. No refunds/replacements for any codes.\n"
-            "5. ❌ SUPPORT: For issues, a full screen-record from purchase to application is required."
+            "5. ❌ SUPPORT: For issues, contact @ProxySupportChat_bot with your order ID."
         )
         await update.message.reply_text(disclaimer)
     elif text == "🆘 Support":
@@ -272,13 +277,16 @@ async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, q
     qr_setting = supabase.table('settings').select('value').eq('key', 'qr_image').execute()
     qr_file_id = qr_setting.data[0]['value'] if qr_setting.data and qr_setting.data[0]['value'] else None
 
+    # Updated invoice with payment instructions using Ultra Pay
     invoice_text = (
         f"🧾 INVOICE\n━━━━━━━━━━━━━━\n"
         f"🆔 {order_id}\n"
         f"📦 {ctype} Off (x{qty})\n"
         f"💰 Pay Exactly: ₹{total}\n"
-        f"⚠️ CRITICAL: You MUST pay exact amount. Do not ignore the paise (decimals), or the bot will NOT find your payment!\n\n"
-        f"⏳ QR valid for 10 minutes."
+        f"🏦 Pay to UPI ID: `{ULTRA_PAY_NUMBER}`\n"
+        f"📝 Comment (mandatory): `{order_id}`\n\n"
+        f"⚠️ CRITICAL: You MUST pay the exact amount and include the order ID as comment. Otherwise, payment will not be detected.\n\n"
+        f"⏳ QR valid for 10 minutes. After payment, click the button below to check payment status."
     )
 
     if qr_file_id:
@@ -286,77 +294,15 @@ async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, q
     else:
         await (update.message or update.callback_query.message).reply_text(invoice_text + "\n\n(QR not set by admin yet)")
 
-    verify_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Verify Payment", callback_data=f"verify_{order_id}")]])
-    await (update.message or update.callback_query.message).reply_text("After payment, click Verify.", reply_markup=verify_keyboard)
+    # New button to check payment automatically
+    check_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Check Payment", callback_data=f"check_{order_id}")]])
+    await (update.message or update.callback_query.message).reply_text("After making payment, click here to verify.", reply_markup=check_keyboard)
 
-# --- Payment verification flow ---
-async def verify_payment_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- Automatic Payment Verification using Ultra Pay API ---
+async def check_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     order_id = query.data.split('_')[1]
-    context.user_data['verify_order_id'] = order_id
-    await query.edit_message_text("Please enter the payer name (the name used for payment):")
-    return WAITING_PAYER_NAME
-
-async def payment_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['payer_name'] = update.message.text
-    await update.message.reply_text("Please send the screenshot of the payment:")
-    return WAITING_PAYMENT_SCREENSHOT
-
-async def payment_screenshot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    photo = update.message.photo[-1]
-    file_id = photo.file_id
-    context.user_data['screenshot_file_id'] = file_id
-    order_id = context.user_data['verify_order_id']
-
-    # Get order details
-    order = supabase.table('orders').select('*').eq('order_id', order_id).execute()
-    if not order.data:
-        await update.message.reply_text("Order not found.")
-        return ConversationHandler.END
-    o = order.data[0]
-
-    # Forward to admins with all info
-    admin_list = ADMIN_IDS
-    user_mention = f"@{update.effective_user.username}" if update.effective_user.username else f"{update.effective_user.first_name}"
-    payer_name = context.user_data['payer_name']
-
-    admin_msg = (
-        f"Payment verification requested:\n"
-        f"User: {user_mention} (ID: {update.effective_user.id})\n"
-        f"Payer Name: {payer_name}\n"
-        f"Order: {o['order_id']}\n"
-        f"Type: {o['coupon_type']} x{o['quantity']}\n"
-        f"Total: ₹{o['total_price']}\n\n"
-        f"Accept or Decline?"
-    )
-    accept_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Accept", callback_data=f"accept_{o['order_id']}"),
-         InlineKeyboardButton("❌ Decline", callback_data=f"decline_{o['order_id']}")]
-    ])
-
-    for admin_id in admin_list:
-        try:
-            await context.bot.send_photo(admin_id, photo=file_id, caption=admin_msg, reply_markup=accept_keyboard)
-        except Exception as e:
-            logging.error(f"Failed to send to admin {admin_id}: {e}")
-
-    await update.message.reply_text("Verification request sent to admin. Please wait for approval.")
-
-    # Clean up
-    context.user_data.pop('verify_order_id', None)
-    context.user_data.pop('payer_name', None)
-    context.user_data.pop('screenshot_file_id', None)
-
-    return ConversationHandler.END
-
-# --- Admin accept/decline ---
-async def admin_accept_decline(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data.split('_')
-    action = data[0]
-    order_id = data[1]
 
     # Fetch order from database
     order = supabase.table('orders').select('*').eq('order_id', order_id).execute()
@@ -365,19 +311,26 @@ async def admin_accept_decline(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     o = order.data[0]
 
-    # Check if order is already processed
+    # If already processed, inform user
     if o['status'] != 'pending':
-        await query.edit_message_text(
-            f"❌ This order ({order_id}) has already been processed (status: {o['status']}).\n"
-            "No further action is possible."
-        )
+        await query.edit_message_text(f"This order is already {o['status']}. Codes have been delivered or declined.")
         return
 
-    if action == "accept":
-        # Fetch unused coupons of the required type
+    # Call Ultra Pay API
+    try:
+        # Run API call in a thread to avoid blocking
+        result = await asyncio.to_thread(call_ultra_pay_api, o['total_price'], order_id)
+    except Exception as e:
+        logging.error(f"API call failed: {e}")
+        await query.edit_message_text("Payment verification service unavailable. Please try again later or contact support.")
+        return
+
+    if result and result.get('status') == 'success':
+        # Payment confirmed
+        # Fetch unused coupons
         coupons = supabase.table('coupons').select('*').eq('type', o['coupon_type']).eq('is_used', False).limit(o['quantity']).execute()
         if len(coupons.data) < o['quantity']:
-            await query.edit_message_text("❌ Insufficient stock! Cannot accept payment.")
+            await query.edit_message_text("❌ Insufficient stock! Please contact admin immediately.")
             return
 
         codes = [c['code'] for c in coupons.data]
@@ -389,25 +342,40 @@ async def admin_accept_decline(update: Update, context: ContextTypes.DEFAULT_TYP
                 'used_at': datetime.utcnow().isoformat()
             }).eq('id', c['id']).execute()
 
-        # Update order status to completed
+        # Update order status
         supabase.table('orders').update({'status': 'completed'}).eq('order_id', order_id).execute()
 
         # Send codes to user
         codes_text = "\n".join(codes)
-        await context.bot.send_message(
-            o['user_id'],
-            f"✅ Payment accepted! Here are your codes:\n{codes_text}\n\nThanks for purchasing!"
+        await query.edit_message_text(
+            f"✅ Payment verified! Here are your codes:\n{codes_text}\n\nThanks for purchasing!",
+            reply_markup=None
+        )
+        # Also send a separate message with codes if they are long
+        await context.bot.send_message(o['user_id'], f"Your {o['coupon_type']} Off codes:\n{codes_text}")
+    else:
+        # Payment not found
+        await query.edit_message_text(
+            "❌ Payment not found. Please ensure you:\n"
+            f"• Paid exactly ₹{o['total_price']} to UPI ID `{ULTRA_PAY_NUMBER}`\n"
+            f"• Included the comment `{order_id}`\n"
+            "• Clicked after the payment was completed.\n\n"
+            "If you have paid and still see this, please wait a few minutes and try again, or contact support."
         )
 
-        await query.edit_message_text(f"✅ Order {order_id} completed. Codes sent to user.")
-    else:  # decline
-        # Update order status to declined
-        supabase.table('orders').update({'status': 'declined'}).eq('order_id', order_id).execute()
-        await context.bot.send_message(
-            o['user_id'],
-            "❌ Your payment has been declined by admin. If there is any issue, contact support."
-        )
-        await query.edit_message_text(f"❌ Order {order_id} declined.")
+def call_ultra_pay_api(amount, comment):
+    """Synchronous function to call Ultra Pay API"""
+    url = "https://ultra-pay.store/APIs/api"
+    params = {
+        "token": ULTRA_PAY_TOKEN,
+        "key": ULTRA_PAY_KEY,
+        "paytoNumber": ULTRA_PAY_NUMBER,
+        "amount": str(amount),
+        "comment": comment
+    }
+    response = requests.get(url, params=params, timeout=10)
+    response.raise_for_status()
+    return response.json()
 
 # ==================== ADMIN HANDLERS ====================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -587,21 +555,11 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
             context.user_data.pop('admin_action', None)
 
 # ==================== CONVERSATION HANDLERS DEFINITIONS ====================
-# Conversation handler for custom quantity
+# Conversation handler for custom quantity only
 conv_handler = ConversationHandler(
     entry_points=[CallbackQueryHandler(quantity_callback, pattern="^qty_custom$")],
     states={
         CUSTOM_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_quantity_input)]
-    },
-    fallbacks=[]
-)
-
-# Conversation handler for payment verification
-payment_conv_handler = ConversationHandler(
-    entry_points=[CallbackQueryHandler(verify_payment_start, pattern="^verify_")],
-    states={
-        WAITING_PAYER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_name_handler)],
-        WAITING_PAYMENT_SCREENSHOT: [MessageHandler(filters.PHOTO, payment_screenshot_handler)]
     },
     fallbacks=[]
 )
@@ -624,15 +582,14 @@ telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("admin", admin_panel))
 
-# 2. Conversation handlers (these manage their own states)
-telegram_app.add_handler(conv_handler)  # custom quantity
-telegram_app.add_handler(payment_conv_handler)  # payment verification (payer name & screenshot)
+# 2. Conversation handlers (custom quantity only)
+telegram_app.add_handler(conv_handler)
 
-# 3. Callback query handlers (for inline buttons)
+# 3. Callback query handlers
 telegram_app.add_handler(CallbackQueryHandler(terms_callback, pattern="^(agree|decline)_terms$"))
 telegram_app.add_handler(CallbackQueryHandler(coupon_type_callback, pattern="^ctype_"))
 telegram_app.add_handler(CallbackQueryHandler(quantity_callback, pattern="^qty_"))
-telegram_app.add_handler(CallbackQueryHandler(admin_accept_decline, pattern="^(accept|decline)_"))
+telegram_app.add_handler(CallbackQueryHandler(check_payment_callback, pattern="^check_"))  # new automatic check
 telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
 
 # 4. Specialized message handlers (photo for QR)
@@ -642,7 +599,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_message_handler(update, context)
 telegram_app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 
-# 5. General text handler (must be last – catches all other text)
+# 5. General text handler (must be last)
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler))
 
 # Initialize the application on the background loop
