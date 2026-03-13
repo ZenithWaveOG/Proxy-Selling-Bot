@@ -5,8 +5,10 @@ import string
 import asyncio
 import threading
 import sys
-import requests  # added for API calls
-from datetime import datetime, timedelta
+import requests
+import qrcode
+from io import BytesIO
+from datetime import datetime
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -26,7 +28,8 @@ ADMIN_IDS = [7515220054]  # Replace with your Telegram user ID
 # Ultra Pay API credentials
 ULTRA_PAY_TOKEN = os.environ.get("ULTRA_PAY_TOKEN")
 ULTRA_PAY_KEY = os.environ.get("ULTRA_PAY_KEY")
-ULTRA_PAY_NUMBER = os.environ.get("ULTRA_PAY_NUMBER")
+ULTRA_PAY_NUMBER = os.environ.get("ULTRA_PAY_NUMBER")  # UPI ID (e.g., "ultrapay247@okaxis")
+MERCHANT_NAME = os.environ.get("MERCHANT_NAME", "Proxy Shop")  # Name shown on UPI screen
 
 # Initialize Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -90,8 +93,8 @@ def get_admin_panel_keyboard():
         [InlineKeyboardButton("🎁 Get Free Code", callback_data="admin_free")],
         [InlineKeyboardButton("💰 Change Prices", callback_data="admin_prices")],
         [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")],
-        [InlineKeyboardButton("🕒 Last 10 Purchases", callback_data="admin_last10")],
-        [InlineKeyboardButton("🖼 Update QR", callback_data="admin_qr")]
+        [InlineKeyboardButton("🕒 Last 10 Purchases", callback_data="admin_last10")]
+        # Removed "🖼 Update QR" – now dynamic QR generation is used
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -100,6 +103,23 @@ def get_coupon_type_admin_keyboard(action):
     for ct in COUPON_TYPES:
         keyboard.append([InlineKeyboardButton(f"{ct} Off", callback_data=f"admin_{action}_{ct}")])
     return InlineKeyboardMarkup(keyboard)
+
+# ==================== QR CODE GENERATION ====================
+def generate_upi_qr(upi_id: str, amount: int, order_id: str, name: str = "Shop") -> bytes:
+    """
+    Generate a QR code image for UPI payment.
+    Returns PNG image bytes.
+    """
+    # UPI URI format: upi://pay?pa=UPI_ID&pn=Name&am=Amount&cu=INR&tn=Note
+    upi_uri = f"upi://pay?pa={upi_id}&pn={name}&am={amount}&cu=INR&tn={order_id}"
+    qr = qrcode.QRCode(box_size=10, border=4)
+    qr.add_data(upi_uri)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    bio = BytesIO()
+    img.save(bio, 'PNG')
+    bio.seek(0)
+    return bio.getvalue()
 
 # ==================== HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -127,8 +147,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # If admin and any admin flag is active, delegate to admin handler
     if user.id in ADMIN_IDS and (
         'admin_action' in context.user_data or
-        context.user_data.get('broadcast') or
-        context.user_data.get('awaiting_qr')
+        context.user_data.get('broadcast')
     ):
         await admin_message_handler(update, context)
         return
@@ -274,29 +293,45 @@ async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, q
         'status': 'pending'
     }).execute()
 
-    qr_setting = supabase.table('settings').select('value').eq('key', 'qr_image').execute()
-    qr_file_id = qr_setting.data[0]['value'] if qr_setting.data and qr_setting.data[0]['value'] else None
-
-    # Updated invoice with payment instructions using Ultra Pay
+    # Updated invoice with payment instructions
     invoice_text = (
         f"🧾 INVOICE\n━━━━━━━━━━━━━━\n"
         f"🆔 {order_id}\n"
         f"📦 {ctype} Off (x{qty})\n"
         f"💰 Pay Exactly: ₹{total}\n"
         f"🏦 Pay to UPI ID: `{ULTRA_PAY_NUMBER}`\n"
-        f"📝 Comment (mandatory): `{order_id}`\n\n"
-        f"⚠️ CRITICAL: You MUST pay the exact amount and include the order ID as comment. Otherwise, payment will not be detected.\n\n"
-        f"⏳ QR valid for 10 minutes. After payment, click the button below to check payment status."
+        f"📝 Comment (auto-filled in QR): `{order_id}`\n\n"
+        f"⏳ Scan the QR code below to pay. The amount and order ID are pre-filled.\n\n"
+        f"After payment, click the 'Check Payment' button."
     )
 
-    if qr_file_id:
-        await (update.message or update.callback_query.message).reply_photo(photo=qr_file_id, caption=invoice_text)
-    else:
-        await (update.message or update.callback_query.message).reply_text(invoice_text + "\n\n(QR not set by admin yet)")
+    # Generate dynamic QR code (in a thread to avoid blocking)
+    try:
+        qr_bytes = await asyncio.to_thread(
+            generate_upi_qr,
+            ULTRA_PAY_NUMBER,
+            total,
+            order_id,
+            MERCHANT_NAME
+        )
+        # Send QR image with invoice text
+        await (update.message or update.callback_query.message).reply_photo(
+            photo=qr_bytes,
+            caption=invoice_text
+        )
+    except Exception as e:
+        logging.error(f"QR generation failed: {e}")
+        # Fallback: send invoice text only
+        await (update.message or update.callback_query.message).reply_text(
+            invoice_text + "\n\n(QR generation failed, please use UPI ID manually)"
+        )
 
-    # New button to check payment automatically
+    # Button to check payment automatically
     check_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Check Payment", callback_data=f"check_{order_id}")]])
-    await (update.message or update.callback_query.message).reply_text("After making payment, click here to verify.", reply_markup=check_keyboard)
+    await (update.message or update.callback_query.message).reply_text(
+        "After making payment, click here to verify.",
+        reply_markup=check_keyboard
+    )
 
 # --- Automatic Payment Verification using Ultra Pay API ---
 async def check_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -358,7 +393,7 @@ async def check_payment_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(
             "❌ Payment not found. Please ensure you:\n"
             f"• Paid exactly ₹{o['total_price']} to UPI ID `{ULTRA_PAY_NUMBER}`\n"
-            f"• Included the comment `{order_id}`\n"
+            f"• Scanned the QR code (it includes the order ID `{order_id}` automatically)\n"
             "• Clicked after the payment was completed.\n\n"
             "If you have paid and still see this, please wait a few minutes and try again, or contact support."
         )
@@ -393,9 +428,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = query.data
 
-    # Clear any previous admin flags
+    # Clear any previous admin flags (broadcast only; qr flag removed)
     context.user_data.pop('broadcast', None)
-    context.user_data.pop('awaiting_qr', None)
     context.user_data.pop('admin_action', None)
 
     if data == "admin_add":
@@ -428,10 +462,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 username = user.data[0]['username'] if user.data else 'Unknown'
                 msg += f"{o['order_id']}: {username} - {o['coupon_type']} x{o['quantity']} - {o['status']} - {o['created_at'][:19]}\n"
             await query.edit_message_text(msg)
-    elif data == "admin_qr":
-        context.user_data['awaiting_qr'] = True
-        await query.edit_message_text("Send the new QR code image.")
-        return
 
     # Handle sub-actions
     elif data.startswith('admin_add_'):
@@ -467,7 +497,6 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if update.effective_user.id not in ADMIN_IDS:
         return
     text = update.message.text if update.message.text else None
-    photo = update.message.photo[-1] if update.message.photo else None
 
     # Handle broadcast
     if context.user_data.get('broadcast'):
@@ -481,17 +510,6 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 pass
         await update.message.reply_text(f"Broadcast sent to {success}/{len(users.data)} users.")
         context.user_data.pop('broadcast', None)
-        return
-
-    # Handle QR update (photo)
-    if context.user_data.get('awaiting_qr'):
-        if photo:
-            file_id = photo.file_id
-            supabase.table('settings').upsert({'key': 'qr_image', 'value': file_id}).execute()
-            await update.message.reply_text("QR code updated.")
-            context.user_data.pop('awaiting_qr', None)
-        else:
-            await update.message.reply_text("Please send an image.")
         return
 
     # Handle admin actions (add, remove, free, price)
@@ -565,41 +583,32 @@ conv_handler = ConversationHandler(
 )
 
 # ==================== BACKGROUND EVENT LOOP ====================
-# Create a background event loop for the bot
 bot_loop = asyncio.new_event_loop()
 
 def start_background_loop(loop):
     asyncio.set_event_loop(loop)
     loop.run_forever()
 
-# Start the background loop in a daemon thread
 threading.Thread(target=start_background_loop, args=(bot_loop,), daemon=True).start()
 
 # ==================== TELEGRAM APPLICATION SETUP ====================
 telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# 1. Command handlers (always first)
+# 1. Command handlers
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("admin", admin_panel))
 
-# 2. Conversation handlers (custom quantity only)
+# 2. Conversation handler (custom quantity)
 telegram_app.add_handler(conv_handler)
 
 # 3. Callback query handlers
 telegram_app.add_handler(CallbackQueryHandler(terms_callback, pattern="^(agree|decline)_terms$"))
 telegram_app.add_handler(CallbackQueryHandler(coupon_type_callback, pattern="^ctype_"))
 telegram_app.add_handler(CallbackQueryHandler(quantity_callback, pattern="^qty_"))
-telegram_app.add_handler(CallbackQueryHandler(check_payment_callback, pattern="^check_"))  # new automatic check
+telegram_app.add_handler(CallbackQueryHandler(check_payment_callback, pattern="^check_"))
 telegram_app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
 
-# 4. Specialized message handlers (photo for QR)
-async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id in ADMIN_IDS and context.user_data.get('awaiting_qr'):
-        await admin_message_handler(update, context)
-telegram_app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-
-# 5. General text handler (must be last)
+# 4. General text handler (must be last)
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler))
 
 # Initialize the application on the background loop
@@ -607,7 +616,7 @@ async def init_app():
     await telegram_app.initialize()
 
 future = asyncio.run_coroutine_threadsafe(init_app(), bot_loop)
-future.result()  # Wait for initialization to complete
+future.result()
 
 # ==================== FLASK WEBHOOK ENDPOINT ====================
 app = Flask(__name__)
